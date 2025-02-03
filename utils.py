@@ -304,6 +304,54 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random'):
     return priorities, partial_prio, pred_value
 
 
+def step(env, logger, throughput, q_vals, policy="random"):
+    '''
+    1. sample priority ordering using q_vals
+    2. 
+
+    Returns
+    =======
+        
+    '''
+
+    if q_vals is None:
+        priorities = list(range(env.num_agents))
+        new_start, new_goals = env.step(priorities)
+        return None, None, None, new_start, new_goals
+    
+    # while priorities are not feasible, sample new pairwise priorities
+    tries = 0
+    while tries < 10:
+        tries += 1
+        priorities, partial_prio, pred_value = sample_priorities(env, logger, env.get_close_pairs(), q_vals[0], policy=policy)
+        
+        # cycle unresolvable
+        if priorities is None:
+            logger.print(
+                "Cycle unresolved, skipping instance\n")
+            env.reset()
+            new_start, new_goals = env.starts, env.goals
+            return None, None, None, None, None
+
+        # print time it takes to take step in env (A* planning)
+        start_time = time.time()
+        new_start, new_goals = env.step(priorities)
+        logger.print("Time to env.step:", time.time()-start_time)
+        if new_start is not None:
+            throughput.append(env.goal_reached)
+            break
+        logger.print("Priorities not feasible, resampling\n")
+    # problem instance unresolvable
+    if tries == 10:
+        logger.print(
+            "Priorities not feasible after 10 tries, skipping instance\n")
+        env.reset()
+        new_start, new_goals = env.starts, env.goals
+        return None, None, None, None, None
+
+    return priorities, partial_prio, pred_value, new_start, new_goals, throughput
+
+
 # %% PRIORITY BASED SEARCH (PBS)
 
 import heapq

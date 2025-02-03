@@ -203,27 +203,32 @@ Loss: 2.293 LTD: 0.972 LOPT: 0.418 LNOPT-min: 0.903
     - need to use .copy(), it's been changing the start_locations and goal_locations
 
 
-27 JAN 2025
+## 27 JAN 2025
 - tested 6 agents trained model on test set, compared with random PP, 1000 instances, throughput is similar at 0.528 and 0.523 respectively
 
 - results of training on 6 agents saved in log_6agents.txt, loss_plot_6agents.png, losses_6agents.png
 
 - results of overfit using PrioritizedReplay after 8K steps saved in overfit_prioritizedreplay.txt, loss_plot_overfit_prioritizedreplay.png
 
-28 JAN 2025
+## 28 JAN 2025
+1. 
 - waiting for train.py on 15 agents
     - Loss: 55.037 LTD: 46.662 LOPT: 4.313 LNOPT-min: 4.062
     - at 12980 steps
 
+2. 
 - use real global reward directly
 
+3. 
 - waiting for train using complex model
 
+4. 
 - unfix Qjt in Lopt and Lnopt like in QTRAN++
 - use QTRAN++ loss calculations
 
 
-30 JAN 2025
+## 30 JAN 2025
+1. 
 - tested trained model of 15 agents on test set and compared to random PP
 - throughput:
     - model : 1.166
@@ -231,10 +236,37 @@ Loss: 2.293 LTD: 0.972 LOPT: 0.418 LNOPT-min: 0.903
 - Loss: 10.844 LTD: 9.206 LOPT: 0.819 LNOPT-min: 0.819
 - at 168400 steps
 
+2. 
 - changed
 - self.params = list(self.q_net.parameters()) + list(self.qjoint_net.parameters()) + list(self.vnet.parameters())
 - to
 - self.params = list({p for net in [self.q_net, self.vnet] for p in net.parameters()})
 - because first one might contain duplicates since we are sharing parameters
 
+3. test overfit without Qjt
 - retraining overfit with updates above to see if Lopt and Lnopt can converge to 0
+- still not converging to 0 even thought its no longer using Qjt
+- step 737, Loss: 7.744 LOPT: 5.558 LNOPT-min: 2.187
+- WHY???
+
+
+## 1 FEB 2025
+- found a recent bug, forgot to copy parameters to fixed_qjoint_net
+- test overfit again
+
+## 2 FEB 2025
+1. test overfit without Qjt
+- confirmed that value of Qjt max is -5, 0
+- confirmed that batch_max_local_rewards is also -5, 0
+. running overfit.py again
+
+2. train.py
+- to at least show that with Lopt, Lnopt < 1 (even though Ltd ~10), model has slightly higher throughput than random PP
+. train again on 15 agents with the self.params fix, at least 168400 steps
+
+. cleaning up files, then move on to training on warehouse maps
+
+3. 
+- easier to train on warehouse map
+- unfix Qjt in Lopt and Lnopt like in QTRAN++
+- use QTRAN++ loss calculations

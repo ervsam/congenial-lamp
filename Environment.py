@@ -342,14 +342,9 @@ class Environment:
         padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=max_val)
         return padded_grid[x:x+fov, y:y+fov]
 
-    def get_obs_fov(self, starts, goals):
+    def get_obs(self):
         '''
         Get the field of view for all agents
-
-        Params
-        ======
-            starts (list): list of start positions
-            goals (list): list of goal positions
 
         Returns
         =======
@@ -359,6 +354,8 @@ class Environment:
         layers = 7
 
         obs = np.zeros((self.num_agents, layers, self.fov, self.fov), dtype=np.float32)
+
+        starts, goals = self.starts, self.goals
 
         for agent, (agent_pos, goal) in enumerate(zip(starts, goals)):
             x, y = agent_pos
@@ -398,7 +395,10 @@ class Environment:
 
         self._old_heur_fovs = [obs[i, 2] for i in range(self.num_agents)]
 
-        return torch.tensor(obs)
+        obs_fovs = torch.tensor(obs)
+        obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)
+        return obs_fovs
+
 
     def _get_neighboring_agents(self, agent):
         neighbors = []

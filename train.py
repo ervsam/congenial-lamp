@@ -1,89 +1,49 @@
 # %%
-import torch.nn.functional as F
-import torch.optim as optim
-import torch.nn as nn
 import torch
-import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
 
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 import copy
 import time
+import yaml
 
 from utils import *
 from Environment import Environment
-from Model import QNetwork, QJoint, VJoint
 from ReplayBuffer import ReplayBuffer, PrioritizedReplayBuffer
 from Trainer import Trainer
 
-# set np seed
+# Load the YAML config file
+with open("config.yaml", "r") as file:
+    config = yaml.safe_load(file)
+
 np.random.seed(0)
 
-logger = Logger("log.txt")
 
-def step(env, q_vals, policy="random"):
-    if q_vals is None:
-        priorities = list(range(env.num_agents))
-        new_start, new_goals = env.step(priorities)
-        return None, None, None, new_start, new_goals
-    
-    # while priorities are not feasible, sample new pairwise priorities
-    tries = 0
-    while tries < 10:
-        tries += 1
-        priorities, partial_prio, pred_value = sample_priorities(env, logger, env.get_close_pairs(), q_vals[0], policy=policy)
-        
-        # cycle unresolvable
-        if priorities is None:
-            logger.print(
-                "Cycle unresolved, skipping instance\n")
-            env.reset()
-            new_start, new_goals = env.starts, env.goals
-            return None, None, None, None, None
+# CONFIGS
+configs = config["training"]
 
-        # print time it takes to take step in env (A* planning)
-        start_time = time.time()
-        new_start, new_goals = env.step(priorities)
-        logger.print("Time to env.step:", time.time()-start_time)
-        if new_start is not None:
-            throughput.append(env.goal_reached)
-            break
-        logger.print("Priorities not feasible, resampling\n")
-    # problem instance unresolvable
-    if tries == 10:
-        logger.print(
-            "Priorities not feasible after 10 tries, skipping instance\n")
-        env.reset()
-        new_start, new_goals = env.starts, env.goals
-        return None, None, None, None, None
-
-    return priorities, partial_prio, pred_value, new_start, new_goals
-
-# %%
-# INITIALIZE ENVIRONMENT
-
-OVERFIT_TEST = 0
-
-SIZE = 14
-NUM_AGENTS = 15
-OBSTACLE_DENSITY = 0.5
-FOV = 7
-WINDOW_SIZE = 3
-
-BATCH_SIZE = 32
-LAMBDA = 1
-LR = 1e-4
-BUFFER_SIZE = 10000
-TRAIN_STEPS = 1e10
-
-N_ACTIONS = 2
+OVERFIT_TEST = configs["OVERFIT_TEST"]
+SIZE = configs["SIZE"]
+NUM_AGENTS = configs["NUM_AGENTS"]
+OBSTACLE_DENSITY = configs["OBSTACLE_DENSITY"]
+FOV = configs["FOV"]
+WINDOW_SIZE = configs["WINDOW_SIZE"]
+BATCH_SIZE = configs["BATCH_SIZE"]
+LAMBDA = configs["LAMBDA"]
+LR = configs["LR"]
+BUFFER_SIZE = configs["BUFFER_SIZE"]
+TRAIN_STEPS = configs["TRAIN_STEPS"]
+N_ACTIONS = configs["N_ACTIONS"]
 
 is_QTRAN_alt = True
 
-trainer = Trainer(LR, BATCH_SIZE, NUM_AGENTS, FOV, is_QTRAN_alt, LAMBDA)
-
 # %%
+logger = Logger("log.txt")
 
 env = Environment(size=SIZE,
                   num_agents=NUM_AGENTS,
@@ -92,18 +52,16 @@ env = Environment(size=SIZE,
                   window_size=WINDOW_SIZE,
                   logger=logger)
 
+trainer = Trainer(LR, BATCH_SIZE, NUM_AGENTS, FOV, is_QTRAN_alt, LAMBDA, env)
+
 # buffer = ReplayBuffer(buffer_size=BUFFER_SIZE)
 buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE)
-
-
 
 throughput = []
 losses = []
 ltds = []
 lopts = []
 lnopts = []
-
-# %% TRAINING LOOP
 
 if OVERFIT_TEST == 1:
     FIXED_START = [(11, 5), (11, 6), (11, 7), (13, 5)]
@@ -126,43 +84,45 @@ elif OVERFIT_TEST == 3:
                    [(2, 14), (9, 7), (1, 2)],
                    ]
 
+# %% TRAINING LOOP
 new_start, new_goals = env.starts, env.goals
 steps = 0
-
 while steps < TRAIN_STEPS:
     steps += 1
     timestep_start = time.time()
     logger.print("Step", steps, "\n")
 
-    # FORCE START AND GOAL LOCATION
+    ############################# GET OBSERVATION ####################################
+    
     if OVERFIT_TEST != 0:
         new_start, new_goals = copy.deepcopy(FIXED_START), copy.deepcopy(FIXED_GOALS)
         env.starts, env.goals = new_start, new_goals
 
-    # GET OBSERVATION FOVS
-    obs_fovs = env.get_obs_fov(new_start, new_goals)
-    obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)
-
-    # GATHER PAIRS OF 'CLOSE' AGENTS
+    old_start, old_goals = copy.deepcopy(new_start), copy.deepcopy(new_goals)
+    obs_fovs = env.get_obs()
     close_pairs = env.get_close_pairs()
 
     if close_pairs == []:
         logger.print("No close pairs, skipping instance\n")
-        _, _, _, new_start, new_goals = step(env, None, policy="random")
+        _, _, _, new_start, new_goals, throughput = step(env, logger, throughput, None, policy="random")
         continue
 
     groups = env.connected_edge_groups()
 
-    # GET Q_VALS
+    ######################### INDIVIDUAL Q-VALUES ####################################
+
     pair_enc, q_vals = trainer.q_net(obs_fovs.unsqueeze(0), [close_pairs])
     assert q_vals[0].shape == (len(close_pairs), 2)
-    # print Q values for each pair
+
     logger.print("Q_vals:")
     for pair, qval in zip(close_pairs, q_vals[0]):
         logger.print(pair, np.round(qval.detach().numpy().squeeze(), 3))
     logger.print()
+
+    ######################### ENV STEP ###############################################
+
+    priorities, partial_prio, pred_value, new_start, new_goals, throughput = step(env, logger, throughput, q_vals, policy="random")
     
-    priorities, partial_prio, pred_value, new_start, new_goals = step(env, q_vals, policy="random")
     if priorities is None:
         env.reset()
         new_start, new_goals = env.starts, env.goals
@@ -187,13 +147,15 @@ while steps < TRAIN_STEPS:
     logger.print("Q'jt:", [round(q.item(), 3) for q in q_prime])
 
     # print vtot
+    group_pair_enc = []
     for group in groups:
         subgroup_pair_enc = []
-        for pair, enc in zip(close_pairs, pair_enc):
+        for pair, enc in zip(close_pairs, pair_enc[0]):
             if pair in group:
                 subgroup_pair_enc.append(enc)
+        group_pair_enc.append(torch.stack(subgroup_pair_enc))
     # batch_pair_enc : 'groups' x 'n_pairs' x h*2
-    vtot = torch.stack(trainer.vnet(subgroup_pair_enc))
+    vtot = torch.stack(trainer.vnet(group_pair_enc))
     logger.print("Vtot:", [round(q.item(), 3) for q in vtot])
 
     actions = torch.stack(list(partial_prio.values()))
@@ -236,6 +198,9 @@ while steps < TRAIN_STEPS:
         # print Q'jt - Qjt
         logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
 
+
+    ################################ INSERT (s, a, r) TO BUFFER ####################################
+
     max_delay = 6
     global_reward = sum([-x for x in env.get_delays()])
     # global_reward = 1 / (sum(env.get_delays()) + 1)
@@ -261,7 +226,7 @@ while steps < TRAIN_STEPS:
     logger.print("Delays:", delays)
     logger.print("Local Rewards:", [round(i, 3) for i in local_rewards], "\n")
 
-    buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups)
+    buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals)
 
     if steps % 100 == 0:
         plot(losses, ylabel="Total Loss", xlabel="Steps", filename="loss_plot.png")
@@ -286,17 +251,17 @@ while steps < TRAIN_STEPS:
         # torch.save(trainer.qjoint_net.state_dict(), f'qjoint_net_{i}.pth')
         # torch.save(trainer.vnet.state_dict(), f'vnet_{i}.pth')
 
-    # OPTIMIZE
+    ########################################### OPTIMIZE ############################################
     if len(buffer) > BATCH_SIZE:
         is_prioritized = isinstance(buffer, PrioritizedReplayBuffer)
         if is_prioritized:
 
-            batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, indices = buffer.sample(BATCH_SIZE)
+            batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, indices = buffer.sample(BATCH_SIZE)
             print("indices:", indices)
         else:
             batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups = buffer.sample(BATCH_SIZE)
 
-        loss, ltd, lopt, lnopt, td_errors = trainer.optimize(batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups)
+        loss, ltd, lopt, lnopt, td_errors = trainer.optimize(batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals)
         if is_QTRAN_alt:
             logger.print("Loss:", loss, "LTD:", ltd,
                         "LOPT:", lopt, "LNOPT-min:", lnopt)
@@ -316,7 +281,7 @@ while steps < TRAIN_STEPS:
         "____________________________________________________________________________")
     
     if steps % 25000 == 0:
-        logger.set_filename(f"log_{steps+1}.txt")
+        logger.set_filename(f"log_{steps}.txt")
 
 # %%
 # given array of paths, visualize the path of all the agents in a gif, where each frame is the agent taking its step

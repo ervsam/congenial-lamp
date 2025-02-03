@@ -22,44 +22,6 @@ np.random.seed(0)
 
 logger = Logger("overfit.txt")
 
-def step(env, q_vals, policy="random"):
-    if q_vals is None:
-        priorities = list(range(env.num_agents))
-        new_start, new_goals = env.step(priorities)
-        return None, None, None, new_start, new_goals
-    
-    # while priorities are not feasible, sample new pairwise priorities
-    tries = 0
-    while tries < 10:
-        tries += 1
-        priorities, partial_prio, pred_value = sample_priorities(env, logger, env.get_close_pairs(), q_vals[0], policy=policy)
-        
-        # cycle unresolvable
-        if priorities is None:
-            logger.print(
-                "Cycle unresolved, skipping instance\n")
-            env.reset()
-            new_start, new_goals = env.starts, env.goals
-            return None, None, None, None, None
-
-        # print time it takes to take step in env (A* planning)
-        start_time = time.time()
-        new_start, new_goals = env.step(priorities)
-        logger.print("Time to env.step:", time.time()-start_time)
-        if new_start is not None:
-            throughput.append(env.goal_reached)
-            break
-        logger.print("Priorities not feasible, resampling\n")
-    # problem instance unresolvable
-    if tries == 10:
-        logger.print(
-            "Priorities not feasible after 10 tries, skipping instance\n")
-        env.reset()
-        new_start, new_goals = env.starts, env.goals
-        return None, None, None, None, None
-
-    return priorities, partial_prio, pred_value, new_start, new_goals
-
 # %%
 # INITIALIZE ENVIRONMENT
 
@@ -147,7 +109,7 @@ while steps < TRAIN_STEPS:
 
     if close_pairs == []:
         logger.print("No close pairs, skipping instance\n")
-        _, _, _, new_start, new_goals = step(env, None, policy="random")
+        _, _, _, new_start, new_goals, throughput = step(env, logger, throughput, None, policy="random")
         continue
 
     groups = env.connected_edge_groups()
@@ -161,7 +123,7 @@ while steps < TRAIN_STEPS:
         logger.print(pair, np.round(qval.detach().numpy().squeeze(), 3))
     logger.print()
     
-    priorities, partial_prio, pred_value, new_start, new_goals = step(env, q_vals, policy="random")
+    priorities, partial_prio, pred_value, new_start, new_goals, throughput = step(env, logger, throughput, q_vals, policy="random")
     if priorities is None:
         env.reset()
         new_start, new_goals = env.starts, env.goals
@@ -185,6 +147,18 @@ while steps < TRAIN_STEPS:
 
     logger.print("Q'jt:", [round(q.item(), 3) for q in q_prime])
 
+    # print vtot
+    group_pair_enc = []
+    for group in groups:
+        subgroup_pair_enc = []
+        for pair, enc in zip(close_pairs, pair_enc[0]):
+            if pair in group:
+                subgroup_pair_enc.append(enc)
+        group_pair_enc.append(torch.stack(subgroup_pair_enc))
+    # batch_pair_enc : 'groups' x 'n_pairs' x h*2
+    vtot = torch.stack(trainer.vnet(group_pair_enc))
+    logger.print("Vtot:", [round(q.item(), 3) for q in vtot])
+
     actions = torch.stack(list(partial_prio.values()))
     # turn actions to one hot encoding and append to pair_enc
     tmp = []
@@ -195,35 +169,37 @@ while steps < TRAIN_STEPS:
     batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
     # batch_pair_enc_action = torch.stack([torch.concat([pair_enc[0][i], F.one_hot(actions[i], num_classes=2)[0]]) for i in range(len(pair_enc[0]))]) # b x n_pairs x h*2+2
 
-    q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
-    if is_QTRAN_alt:
-        group_onehot = []
-        for group in groups:
-            subgroup_actions = []
-            for pair, act in zip(close_pairs, batch_onehot_actions):
-                if pair in group:
-                    subgroup_actions.append(act)
-            group_onehot.append(torch.stack(subgroup_actions))
+
+    ############ if using Q-JOINT ############
+    # q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
+    # if is_QTRAN_alt:
+    #     group_onehot = []
+    #     for group in groups:
+    #         subgroup_actions = []
+    #         for pair, act in zip(close_pairs, batch_onehot_actions):
+    #             if pair in group:
+    #                 subgroup_actions.append(act)
+    #         group_onehot.append(torch.stack(subgroup_actions))
     
-        selected_Qs = []
-        for q, act in zip(q_jt_alt, group_onehot):
-            selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().numpy()))
-        # selected_Q = torch.sum((q_jt_alt * batch_onehot_actions), dim=1)
+    #     selected_Qs = []
+    #     for q, act in zip(q_jt_alt, group_onehot):
+    #         selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().numpy()))
+    #     # selected_Q = torch.sum((q_jt_alt * batch_onehot_actions), dim=1)
 
-        logger.print("Q-joint predicted:")
-        for i in selected_Qs:
-            logger.print([round(j, 3) for j in i])
+    #     logger.print("Q-joint predicted:")
+    #     for i in selected_Qs:
+    #         logger.print([round(j, 3) for j in i])
 
-        # print Q'jt - Qjt
-        logger.print("Q'jt - Qjt:")
-        for i, group_q in enumerate(selected_Qs):
-            logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
-        logger.print()
-    else:
-        logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
+    #     # print Q'jt - Qjt
+    #     logger.print("Q'jt - Qjt:")
+    #     for i, group_q in enumerate(selected_Qs):
+    #         logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
+    #     logger.print()
+    # else:
+    #     logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
 
-        # print Q'jt - Qjt
-        logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
+    #     # print Q'jt - Qjt
+    #     logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
 
     max_delay = 6
     global_reward = sum([-x for x in env.get_delays()])
@@ -288,8 +264,8 @@ while steps < TRAIN_STEPS:
     logger.print(
         "____________________________________________________________________________")
     
-    if steps+1 % 2.5e5 == 0:
-        logger.set_filename(f"log_{steps+1}.txt")
+    if steps % 25000 == 0:
+        logger.set_filename(f"overfit_{steps}.txt")
 
 
 
