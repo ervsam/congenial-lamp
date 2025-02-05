@@ -17,15 +17,18 @@ from Environment import Environment
 from ReplayBuffer import ReplayBuffer, PrioritizedReplayBuffer
 from Trainer import Trainer
 
+import os
+file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+
 # Load the YAML config file
-with open("config.yaml", "r") as file:
-    config = yaml.safe_load(file)
+with open(file_path, "r") as file:
+    config_file = yaml.safe_load(file)
 
 np.random.seed(0)
 
 
 # CONFIGS
-configs = config["training"]
+configs = config_file["training"]
 
 OVERFIT_TEST = configs["OVERFIT_TEST"]
 SIZE = configs["SIZE"]
@@ -35,9 +38,9 @@ FOV = configs["FOV"]
 WINDOW_SIZE = configs["WINDOW_SIZE"]
 BATCH_SIZE = configs["BATCH_SIZE"]
 LAMBDA = configs["LAMBDA"]
-LR = configs["LR"]
+LR = float(configs["LR"])
 BUFFER_SIZE = configs["BUFFER_SIZE"]
-TRAIN_STEPS = configs["TRAIN_STEPS"]
+TRAIN_STEPS = float(configs["TRAIN_STEPS"])
 N_ACTIONS = configs["N_ACTIONS"]
 
 is_QTRAN_alt = True

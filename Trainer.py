@@ -216,24 +216,23 @@ class Trainer:
 
                     pairs_action = {}
                     pair_qval = {}
-                    edges = []
                     for pair, confidence, action in zip(close_pairs, q_vals, max_actions):
                         t = round((max(confidence) - min(confidence)).item(), 3)
                         if action == 1:
                             pair_qval[pair[::-1]] = t
-                            edges.append(pair[::-1])
                         else:
                             pair_qval[pair] = t
-                            edges.append(pair)
                         pairs_action[pair] = action
                     pair_qval = dict(sorted(pair_qval.items(), key=lambda item: item[1], reverse=True))
-
+                            
                     graph = DirectedGraph(self.env.num_agents)
-                    for pair, (u, v) in zip(close_pairs, edges):
+                    for u, v in zip(pair_qval.keys()):
+                        ori_pair = (min(u,v), max(u,v))
                         if graph.add_edge(u, v): # if edge doesn't form a cycle
                             continue
                         else:
-                            pairs_action[pair] = 1 - pairs_action[pair]
+                            assert graph.add_edge(v, u)
+                            pairs_action[ori_pair] = 1 - pairs_action[ori_pair]
 
                     actions = list(pairs_action.values())
 
@@ -252,24 +251,24 @@ class Trainer:
                         actions = torch.multinomial(probs, 1)
                         pairs_action = {}
                         pair_qval = {}
-                        edges = []
                         for pair, confidence, action in zip(close_pairs, q_vals, actions):
                             t = round((max(confidence) - min(confidence)).item(), 3)
                             if action == 1:
                                 pair_qval[pair[::-1]] = t
-                                edges.append(pair[::-1])
                             else:
                                 pair_qval[pair] = t
-                                edges.append(pair)
                             pairs_action[pair] = action
                         pair_qval = dict(sorted(pair_qval.items(), key=lambda item: item[1], reverse=True))
 
                         graph = DirectedGraph(self.env.num_agents)
-                        for pair, (u, v) in zip(close_pairs, edges):
+                        for u, v in zip(pair_qval.keys()):
+                            ori_pair = (min(u,v), max(u,v))
                             if graph.add_edge(u, v): # if edge doesn't form a cycle
                                 continue
                             else:
-                                pairs_action[pair] = 1 - pairs_action[pair]
+                                assert graph.add_edge(v, u)
+                                pairs_action[ori_pair] = 1 - pairs_action[ori_pair]
+
                         actions = list(pairs_action.values())
 
                         partial_prio = dict()
@@ -390,15 +389,12 @@ class Trainer:
 
                     pairs_action = {}
                     pair_qval = {}
-                    edges = []
                     for pair, confidence, action in zip(close_pairs, q_vals, actions):
                         t = round((max(confidence) - min(confidence)).item(), 3)
                         if action == 1:
                             pair_qval[pair[::-1]] = t
-                            edges.append(pair[::-1])
                         else:
                             pair_qval[pair] = t
-                            edges.append(pair)
                         pairs_action[pair] = action
                     
                     # for each agent
@@ -406,25 +402,12 @@ class Trainer:
                     for ori_pair, pair in zip(pairs_action, pair_qval):
                         pairs_action_modified = pairs_action.copy()
                         pair_qval_modified = pair_qval.copy()
-                        # edges_modified = edges.copy()
                         
                         # find local_reward for both actions
                         local_rew_for_each_action = [] # will be a size of 2
                         for action in [0, 1]:
                             if pairs_action_modified[ori_pair] != action:
                                 pairs_action_modified[ori_pair] = action
-                                # edges_modified = [pair[::-1] if x==pair else x for x in edges_modified]
-
-                            # pair_qval_modified[pair] = 1
-
-                            # pair_qval_modified = dict(sorted(pair_qval_modified.items(), key=lambda item: item[1], reverse=True))
-
-                            # graph = DirectedGraph(self.env.num_agents)
-                            # for p, (u, v) in zip(close_pairs, edges_modified):
-                            #     if graph.add_edge(u, v): # if edge doesn't form a cycle
-                            #         continue
-                            #     else:
-                            #         pairs_action_modified[p] = 1 - pairs_action_modified[p]
 
                             actions = list(pairs_action_modified.values())
 
@@ -461,7 +444,7 @@ class Trainer:
                                     for group in group_agents:
                                         if ori_pair[0] in group:
                                             rew = sum([-delays[agent] for agent in group])
-                                            
+
                                 if tuple(starts) not in self.memory:
                                     self.memory[tuple(starts)] = {}
                                 self.memory[tuple(starts)][tuple([tuple(x) for x in goals])] = rew

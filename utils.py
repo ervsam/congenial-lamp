@@ -218,11 +218,13 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random'):
     pair_qval = dict(sorted(pair_qval.items(), key=lambda item: item[1], reverse=True))
 
     graph = DirectedGraph(env.num_agents)
-    for pair, (u, v) in zip(close_pairs, edges):
+    for u, v in list(pair_qval.keys()):
+        ori_pair = (min(u,v), max(u,v))
         if graph.add_edge(u, v): # if edge doesn't form a cycle
             continue
         else:
-            pairs_action[pair] = 1 - pairs_action[pair]
+            assert graph.add_edge(v, u)
+            pairs_action[ori_pair] = 1 - pairs_action[ori_pair]
 
     actions = list(pairs_action.values())
 
