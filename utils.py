@@ -317,11 +317,12 @@ def step(env, logger, throughput, q_vals, policy="random"):
     if q_vals is None:
         priorities = list(range(env.num_agents))
         new_start, new_goals = env.step(priorities)
-        return None, None, None, new_start, new_goals
+        return None, None, None, new_start, new_goals, throughput
     
     # while priorities are not feasible, sample new pairwise priorities
     tries = 0
-    while tries < 10:
+    MAX_TRIES = 2
+    while tries < MAX_TRIES:
         tries += 1
         priorities, partial_prio, pred_value = sample_priorities(env, logger, env.get_close_pairs(), q_vals[0], policy=policy)
         
@@ -331,7 +332,7 @@ def step(env, logger, throughput, q_vals, policy="random"):
                 "Cycle unresolved, skipping instance\n")
             env.reset()
             new_start, new_goals = env.starts, env.goals
-            return None, None, None, None, None
+            return None, None, None, None, None, throughput
 
         # print time it takes to take step in env (A* planning)
         start_time = time.time()
@@ -342,12 +343,11 @@ def step(env, logger, throughput, q_vals, policy="random"):
             break
         logger.print("Priorities not feasible, resampling\n")
     # problem instance unresolvable
-    if tries == 10:
-        logger.print(
-            "Priorities not feasible after 10 tries, skipping instance\n")
+    if tries == MAX_TRIES:
+        logger.print(f"Priorities not feasible after {MAX_TRIES} tries, skipping instance\n")
         env.reset()
         new_start, new_goals = env.starts, env.goals
-        return None, None, None, None, None
+        return None, None, None, None, None, throughput
 
     return priorities, partial_prio, pred_value, new_start, new_goals, throughput
 

@@ -38,8 +38,7 @@ def is_valid(old_x, old_y, x, y, t, grid, dynamic_constraints, edge_constraints)
 def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
     goals = copy.deepcopy(goals)
     goal = goals.pop(0)
-    start_node = Node(start[0], start[1], 0, 0, heuristic(
-        start[0], start[1], goal[0], goal[1]))
+    start_node = Node(start[0], start[1], 0, 0, heuristic(start[0], start[1], goal[0], goal[1]))
     goal_node = Node(goal[0], goal[1], 0, 0, 0)
 
     open_list = []

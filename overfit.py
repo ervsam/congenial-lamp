@@ -1,29 +1,25 @@
 # %%
-import torch.nn.functional as F
-import torch.optim as optim
-import torch.nn as nn
 import torch
-import numpy as np
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
 
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 import copy
 import time
+import yaml
 
 from utils import *
 from Environment import Environment
-from Model import QNetwork, QJoint, VJoint
 from ReplayBuffer import ReplayBuffer, PrioritizedReplayBuffer
 from Trainer import Trainer
 
 # set np seed
 np.random.seed(0)
 
-logger = Logger("overfit.txt")
-
-# %%
-# INITIALIZE ENVIRONMENT
 
 OVERFIT_TEST = 3
 
@@ -38,13 +34,12 @@ LAMBDA = 1
 LR = 1e-4
 BUFFER_SIZE = 10000
 TRAIN_STEPS = 1e10
-
 N_ACTIONS = 2
 
 is_QTRAN_alt = True
 
-
 # %%
+logger = Logger("overfit.txt")
 
 env = Environment(size=SIZE,
                   num_agents=NUM_AGENTS,
@@ -57,8 +52,6 @@ env = Environment(size=SIZE,
 buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE)
 
 trainer = Trainer(LR, BATCH_SIZE, NUM_AGENTS, FOV, is_QTRAN_alt, LAMBDA, env)
-
-
 
 throughput = []
 losses = []
@@ -101,10 +94,7 @@ while steps < TRAIN_STEPS:
 
     # GET OBSERVATION FOVS
     old_start, old_goals = copy.deepcopy(new_start), copy.deepcopy(new_goals)
-    obs_fovs = env.get_obs_fov(new_start, new_goals)
-    obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)
-
-    # GATHER PAIRS OF 'CLOSE' AGENTS
+    obs_fovs = env.get_obs()
     close_pairs = env.get_close_pairs()
 
     if close_pairs == []:
@@ -117,13 +107,14 @@ while steps < TRAIN_STEPS:
     # GET Q_VALS
     pair_enc, q_vals = trainer.q_net(obs_fovs.unsqueeze(0), [close_pairs])
     assert q_vals[0].shape == (len(close_pairs), 2)
-    # print Q values for each pair
+
     logger.print("Q_vals:")
     for pair, qval in zip(close_pairs, q_vals[0]):
         logger.print(pair, np.round(qval.detach().numpy().squeeze(), 3))
     logger.print()
     
     priorities, partial_prio, pred_value, new_start, new_goals, throughput = step(env, logger, throughput, q_vals, policy="random")
+
     if priorities is None:
         env.reset()
         new_start, new_goals = env.starts, env.goals
@@ -167,8 +158,6 @@ while steps < TRAIN_STEPS:
     pair_enc = torch.stack(tmp)
     batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2)
     batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
-    # batch_pair_enc_action = torch.stack([torch.concat([pair_enc[0][i], F.one_hot(actions[i], num_classes=2)[0]]) for i in range(len(pair_enc[0]))]) # b x n_pairs x h*2+2
-
 
     ############ if using Q-JOINT ############
     # q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
@@ -232,7 +221,7 @@ while steps < TRAIN_STEPS:
         plot(losses, ylabel="Total Loss", xlabel="Steps", filename="loss_plot_overfit.png")
         # plot(throughput, ylabel="Throughput", xlabel="Steps", filename="throughput_plot.png")
     # save model
-    if steps % 2500 == 0:
+    if steps % 5000 == 0:
         torch.save(trainer.q_net.state_dict(), f'q_net_model/q_net_{steps}.pth')
         # torch.save(trainer.qjoint_net.state_dict(), f'qjoint_net_{i}.pth')
         # torch.save(trainer.vnet.state_dict(), f'vnet_{i}.pth')

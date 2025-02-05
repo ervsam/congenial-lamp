@@ -166,7 +166,6 @@ while steps < TRAIN_STEPS:
     pair_enc = torch.stack(tmp)
     batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2)
     batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
-    # batch_pair_enc_action = torch.stack([torch.concat([pair_enc[0][i], F.one_hot(actions[i], num_classes=2)[0]]) for i in range(len(pair_enc[0]))]) # b x n_pairs x h*2+2
 
     q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
     if is_QTRAN_alt:

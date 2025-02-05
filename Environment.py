@@ -208,8 +208,7 @@ class Environment:
         self.goal_reached = 0
         self.optimal_goal_reached = 0
         self.goal_reached_per_agent = [0 for _ in range(self.num_agents)]
-        self.optimal_goal_reached_per_agent = [
-            0 for _ in range(self.num_agents)]
+        self.optimal_goal_reached_per_agent = [0 for _ in range(self.num_agents)]
         # clear the dynamic constraints and edge constraints
         self.dynamic_constraints.clear()
         self.edge_constraints.clear()
@@ -227,8 +226,7 @@ class Environment:
 
         for agent in priorities:
             # TODO: update ST A* to handle multiple goals
-            path = space_time_astar(
-                self.grid_map, self.starts[agent], self.goals[agent], self.dynamic_constraints, self.edge_constraints)
+            path = space_time_astar(self.grid_map, self.starts[agent], self.goals[agent], self.dynamic_constraints, self.edge_constraints)
 
             if path is None:
                 return None, None
@@ -236,8 +234,7 @@ class Environment:
             temp_paths.append(path)
             self.actual_path_lengths[agent] = path
 
-            optimal_path = space_time_astar(
-                self.grid_map, self.starts[agent], self.goals[agent], {}, {})
+            optimal_path = space_time_astar(self.grid_map, self.starts[agent], self.goals[agent], {}, {})
 
             temp_opt_paths.append(optimal_path)
             self.optimal_path_lengths[agent] = optimal_path
@@ -319,7 +316,7 @@ class Environment:
             self.paths[agent] = path[:self.window_size+1]
 
         # update the heuristic map
-        self.get_DHCheur()
+        # self.get_DHCheur()
 
         return self.starts, self.goals
 

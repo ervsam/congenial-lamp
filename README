@@ -256,17 +256,46 @@ Loss: 2.293 LTD: 0.972 LOPT: 0.418 LNOPT-min: 0.903
 
 ## 2 FEB 2025
 1. test overfit without Qjt
+a. why cant Lopt and Lnopt be 0
 - confirmed that value of Qjt max is -5, 0
 - confirmed that batch_max_local_rewards is also -5, 0
-. running overfit.py again
+- running overfit.py again
+- Q'jt max action is ~ -5, so why is Lopt 5.5?
+    - training again while also printing Q'jt, local reward, vtot
+    - found mistake, wrong calc of lopt, needed unsqueeze batch_max_local_rewards.unsqueeze(1) otherwise turned into (288, 288) shape instead of (288, 1)
+- running overfit.py again
+    - Lopt is now < 1
+    - but there is mistake in calculating Lnopt-min, cant just use local_reward, that would be QTRAN-base
+        - would need to run env.step for both actions
+    - implemented env.step for every (u, u_-i), takes very long to run
+    - implemented "memory" to keep memory[start][goal] = delay
+    - trained again converged to these values at 800 steps
+    Q_vals:
+    (0, 1) [-0.037  0.13 ]
+    (0, 2) [-0.176  0.287]
+    (0, 3) [ 0.559 -0.602]
+    (1, 2) [-0.268  0.357]
+    (1, 3) [ 0.469 -0.545]
+    (2, 3) [ 0.575 -0.58 ]
+    (4, 5) [ 0.028 -0.139]
+    (4, 6) [-0.006 -0.098]
+    (5, 6) [ 0.032 -0.115]
+
 
 2. train.py
 - to at least show that with Lopt, Lnopt < 1 (even though Ltd ~10), model has slightly higher throughput than random PP
-. train again on 15 agents with the self.params fix, at least 168400 steps
+- train again on 15 agents with the self.params fix, at least 168400 steps
+- after 185000 steps Ltd is around 10, sometimes 20
+- and throughput compared to random is (1.138, 1.148) respectively
+. try not using Qjt, use local reward directly
+
 
 . cleaning up files, then move on to training on warehouse maps
 
 3. 
+- train using epsilon greedy
 - easier to train on warehouse map
 - unfix Qjt in Lopt and Lnopt like in QTRAN++
+- normalize delay, or cap max delay to -10
+- localize reward to 1 step away from pair
 - use QTRAN++ loss calculations

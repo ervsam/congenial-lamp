@@ -13,7 +13,7 @@ class Trainer:
 
         self.env = copy.deepcopy(env)
 
-        self.use_local_rewards = False
+        self.use_local_rewards = True
 
         self.q_net = QNetwork()
         if not self.use_local_rewards:
@@ -30,6 +30,8 @@ class Trainer:
         self.fov = FOV
         self.is_QTRAN_alt = is_QTRAN_alt
         self.LAMBDA = LAMBDA
+
+        self.memory = {}
 
         if not self.use_local_rewards:
             # copy weights from q_net to fixed_qjoint_net
@@ -240,6 +242,7 @@ class Trainer:
                         partial_prio[(agent, neighbor)] = actions[i]
 
                     priorities, cycle = topological_sort(partial_prio, num_nodes=self.env.num_agents).values()
+
                     # 2
                     new_start, new_goals = self.env.step(priorities)
 
@@ -329,9 +332,13 @@ class Trainer:
                 lopt = torch.mean((q_prime_max - max_Q + vtot) ** 2)
                 print("maxQ:", max_Q[:9])
             else:
-                # assert q_prime_max.shape == batch_max_local_rewards.unsqueeze(1).shape, f"Expected {q_prime_max.shape}, got {batch_max_local_rewards.unsqueeze(1).shape}"
-                lopt = torch.mean((q_prime_max - batch_max_local_rewards + vtot) ** 2)
+                assert q_prime_max.shape == batch_max_local_rewards.unsqueeze(1).shape, f"Expected {q_prime_max.shape}, got {batch_max_local_rewards.unsqueeze(1).shape}"
+                print("lopt shape:", (q_prime_max - batch_max_local_rewards.unsqueeze(1) + vtot).shape)
+                lopt = torch.mean((q_prime_max - batch_max_local_rewards.unsqueeze(1) + vtot) ** 2)
+                print("q_prime_max:", q_prime_max[:9])
                 print("local reward:", batch_max_local_rewards[:9])
+                print("vtot:", vtot[:9])
+
 
             # revert
             tmp = []
@@ -359,10 +366,124 @@ class Trainer:
 
             # print("q_prime_alt.shape, fixed_q_jt_alt.shape, vtot.shape)", q_prime_alt.shape, fixed_q_jt_alt.shape, vtot.shape)
 
+
+            ########################################### Qjt(ui, u_-i) ##################################################
+            if self.use_local_rewards:
+                # 1
+                # for each instance in batch,
+                # for each agent
+                # find local_reward for both actions
+
+                # revert batch_actions
+                tmp = []
+                start = 0
+                for num in num_n_pairs:
+                    Q = batch_actions[start:start+num]
+                    tmp.append(Q)
+                    start += num
+                batch_actions = tmp # b x 'n_pairs' x N_ACTIONS
+
+                batch_counter_reward = [] # will be a size of batch_size
+                for starts, goals, close_pairs, q_vals, actions in zip(batch_starts, batch_goals, batch_close_pairs, batch_q_vals, batch_actions):
+                    self.env.starts = copy.deepcopy(starts)
+                    self.env.goals = copy.deepcopy(goals)
+
+                    pairs_action = {}
+                    pair_qval = {}
+                    edges = []
+                    for pair, confidence, action in zip(close_pairs, q_vals, actions):
+                        t = round((max(confidence) - min(confidence)).item(), 3)
+                        if action == 1:
+                            pair_qval[pair[::-1]] = t
+                            edges.append(pair[::-1])
+                        else:
+                            pair_qval[pair] = t
+                            edges.append(pair)
+                        pairs_action[pair] = action
+                    
+                    # for each agent
+                    local_rew_for_each_agent = [] # will be a size of len(close_pairs)
+                    for ori_pair, pair in zip(pairs_action, pair_qval):
+                        pairs_action_modified = pairs_action.copy()
+                        pair_qval_modified = pair_qval.copy()
+                        # edges_modified = edges.copy()
+                        
+                        # find local_reward for both actions
+                        local_rew_for_each_action = [] # will be a size of 2
+                        for action in [0, 1]:
+                            if pairs_action_modified[ori_pair] != action:
+                                pairs_action_modified[ori_pair] = action
+                                # edges_modified = [pair[::-1] if x==pair else x for x in edges_modified]
+
+                            # pair_qval_modified[pair] = 1
+
+                            # pair_qval_modified = dict(sorted(pair_qval_modified.items(), key=lambda item: item[1], reverse=True))
+
+                            # graph = DirectedGraph(self.env.num_agents)
+                            # for p, (u, v) in zip(close_pairs, edges_modified):
+                            #     if graph.add_edge(u, v): # if edge doesn't form a cycle
+                            #         continue
+                            #     else:
+                            #         pairs_action_modified[p] = 1 - pairs_action_modified[p]
+
+                            actions = list(pairs_action_modified.values())
+
+                            partial_prio = dict()
+                            for i, (agent, neighbor) in enumerate(close_pairs):
+                                partial_prio[(agent, neighbor)] = actions[i]
+
+                            priorities, cycle = topological_sort(partial_prio, num_nodes=self.env.num_agents).values()
+                            # 2
+                            if priorities is None:
+                                local_rew_for_each_action.append(-50)
+                                continue
+
+
+                            if tuple(starts) in self.memory and tuple([tuple(x) for x in goals]) in self.memory[tuple(starts)]:
+                                local_rew_for_each_action.append(self.memory[tuple(starts)][tuple([tuple(x) for x in goals])])
+                            else:
+                                self.env.starts = copy.deepcopy(starts)
+                                self.env.goals = copy.deepcopy(goals)
+                                new_start, new_goals = self.env.step(priorities)
+
+                                # 3
+                                rew = 0
+                                group_agents = []
+                                if new_start is None:
+                                    rew = -50
+                                else:
+                                    delays = self.env.get_delays()
+                                    for group in groups:
+                                        set_s = set()
+                                        for pair in group:
+                                            set_s.update(pair)
+                                        group_agents.append(list(set_s))
+                                    for group in group_agents:
+                                        if ori_pair[0] in group:
+                                            rew = sum([-delays[agent] for agent in group])
+                                            
+                                if tuple(starts) not in self.memory:
+                                    self.memory[tuple(starts)] = {}
+                                self.memory[tuple(starts)][tuple([tuple(x) for x in goals])] = rew
+
+                                local_rew_for_each_action.append(rew)
+
+                        local_rew_for_each_agent.append(local_rew_for_each_action)
+                    
+                    batch_counter_reward.append(local_rew_for_each_agent)
+
+                # expand
+                tmp = []
+                for c_r in batch_counter_reward:
+                    tmp += c_r
+                batch_counter_reward = torch.tensor(tmp, dtype=torch.float32)
+
+
             if not self.use_local_rewards:
                 lnopt_min = torch.mean(torch.min(q_prime_alt - fixed_q_jt_alt.detach() + vtot, dim=1).values ** 2)
             else:
                 # assert q_prime_alt.shape == batch_local_rewards.unsqueeze(1).shape, f"Expected {q_prime_alt.shape}, got {batch_local_rewards.unsqueeze(1).shape}"
+                print("lnopt_min shape:", (q_prime_alt - batch_local_rewards.unsqueeze(1) + vtot).shape)
                 lnopt_min = torch.mean(torch.min(q_prime_alt - batch_local_rewards.unsqueeze(1) + vtot, dim=1).values ** 2)
 
             if not self.use_local_rewards:
@@ -379,7 +500,7 @@ class Trainer:
                 c = np.mean(torch.abs(q_prime_alt - fixed_q_jt_alt.detach() + vtot).detach().numpy(), axis=1, keepdims=True)
                 td_errors = a + b + c
             else:
-                b = torch.abs(batch_max_local_rewards - q_prime_max).detach().numpy()
+                b = torch.abs(batch_max_local_rewards.unsqueeze(1) - q_prime_max).detach().numpy()
                 c = np.mean(torch.abs(q_prime_alt - batch_local_rewards.unsqueeze(1)).detach().numpy(), axis=1, keepdims=True)
                 td_errors = b + c
 
