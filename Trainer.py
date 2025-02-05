@@ -226,7 +226,7 @@ class Trainer:
                     pair_qval = dict(sorted(pair_qval.items(), key=lambda item: item[1], reverse=True))
                             
                     graph = DirectedGraph(self.env.num_agents)
-                    for u, v in zip(pair_qval.keys()):
+                    for u, v in list(pair_qval.keys()):
                         ori_pair = (min(u,v), max(u,v))
                         if graph.add_edge(u, v): # if edge doesn't form a cycle
                             continue
@@ -261,7 +261,7 @@ class Trainer:
                         pair_qval = dict(sorted(pair_qval.items(), key=lambda item: item[1], reverse=True))
 
                         graph = DirectedGraph(self.env.num_agents)
-                        for u, v in zip(pair_qval.keys()):
+                        for u, v in list(pair_qval.keys()):
                             ori_pair = (min(u,v), max(u,v))
                             if graph.add_edge(u, v): # if edge doesn't form a cycle
                                 continue
