@@ -12,13 +12,13 @@ training:
   OBSTACLE_DENSITY: 0.5
   FOV: 7
   WINDOW_SIZE: 3
-
-  BATCH_SIZE: 32
   LAMBDA: 1
+  N_ACTIONS: 2
+
+  BATCH_SIZE: 8
   LR: 1e-4
   BUFFER_SIZE: 10000
   TRAIN_STEPS: 1e10
-  N_ACTIONS: 2
   
 
 paths:

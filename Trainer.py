@@ -152,10 +152,11 @@ class Trainer:
 
         # CALCULATE LOSSES
         if self.is_QTRAN_alt:
-            l = []
+            num_pairs_in_group = [] # len: batch_size * 'n_groups'
             for groups in batch_groups:
                 for group in groups:
-                    l.append(len(group))
+                    num_pairs_in_group.append(len(group))
+            
 
             if not self.use_local_rewards:
                 # q_jt_alt: b x 'n_pairs' x N_ACTIONS
@@ -187,7 +188,7 @@ class Trainer:
 
             # expand
             tmp = []
-            for idx, num in enumerate(l):
+            for idx, num in enumerate(num_pairs_in_group):
                 tmp += [batch_local_rewards[idx]] * num
             batch_local_rewards = torch.stack(tmp)
 
@@ -210,7 +211,7 @@ class Trainer:
                 batch_max_actions = tmp # b x 'n_pairs' x N_ACTIONS
 
                 batch_max_local_rewards = []
-                for starts, goals, close_pairs, q_vals, max_actions in zip(batch_starts, batch_goals, batch_close_pairs, batch_q_vals, batch_max_actions):
+                for starts, goals, close_pairs, q_vals, max_actions, groups in zip(batch_starts, batch_goals, batch_close_pairs, batch_q_vals, batch_max_actions, batch_groups):
                     self.env.starts = starts.copy()
                     self.env.goals = goals.copy()
 
@@ -283,24 +284,27 @@ class Trainer:
                     # 3
                     local_rewards = []
                     group_agents = []
+                    for group in groups:
+                        set_s = set()
+                        for pair in group:
+                            set_s.update(pair)
+                        group_agents.append(list(set_s))
+
                     if new_start is None:
                         for group in group_agents:
                             local_rewards.append(-50)
                     else:
                         delays = self.env.get_delays()
-                        for group in groups:
-                            set_s = set()
-                            for pair in group:
-                                set_s.update(pair)
-                            group_agents.append(list(set_s))
+                        
                         for group in group_agents:
                             local_rewards.append(sum([-delays[agent] for agent in group]))
 
                     batch_max_local_rewards += local_rewards
 
                 # expand
+                assert len(batch_max_local_rewards) == len(num_pairs_in_group), f"Expected {len(batch_max_local_rewards)}, got {len(num_pairs_in_group)}"
                 tmp = []
-                for idx, num in enumerate(l):
+                for idx, num in enumerate(num_pairs_in_group):
                     tmp += [batch_max_local_rewards[idx]] * num
                 batch_max_local_rewards = torch.tensor(tmp, dtype=torch.float32)
 
@@ -315,11 +319,11 @@ class Trainer:
 
             # expand
             tmp = []
-            for idx, num in enumerate(l):
+            for idx, num in enumerate(num_pairs_in_group):
                 tmp += [q_prime_max[idx]] * num
             q_prime_max = torch.stack(tmp)
             tmp = []
-            for idx, num in enumerate(l):
+            for idx, num in enumerate(num_pairs_in_group):
                 tmp += [vtot[idx]] * num
             vtot = torch.stack(tmp)
 
@@ -422,8 +426,8 @@ class Trainer:
                                 continue
 
 
-                            if tuple(starts) in self.memory and tuple([tuple(x) for x in goals]) in self.memory[tuple(starts)]:
-                                local_rew_for_each_action.append(self.memory[tuple(starts)][tuple([tuple(x) for x in goals])])
+                            if tuple(starts) in self.memory and tuple([tuple(x) for x in goals]) in self.memory[tuple(starts)] and tuple(priorities) in self.memory[tuple(starts)][tuple([tuple(x) for x in goals])]:
+                                local_rew_for_each_action.append(self.memory[tuple(starts)][tuple([tuple(x) for x in goals])][tuple(priorities)])
                             else:
                                 self.env.starts = copy.deepcopy(starts)
                                 self.env.goals = copy.deepcopy(goals)
@@ -447,7 +451,9 @@ class Trainer:
 
                                 if tuple(starts) not in self.memory:
                                     self.memory[tuple(starts)] = {}
-                                self.memory[tuple(starts)][tuple([tuple(x) for x in goals])] = rew
+                                if tuple([tuple(x) for x in goals]) not in self.memory[tuple(starts)]:
+                                    self.memory[tuple(starts)][tuple([tuple(x) for x in goals])] = {}
+                                self.memory[tuple(starts)][tuple([tuple(x) for x in goals])][tuple(priorities)] = rew
 
                                 local_rew_for_each_action.append(rew)
 

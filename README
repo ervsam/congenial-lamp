@@ -287,8 +287,8 @@ a. why cant Lopt and Lnopt be 0
 - train again on 15 agents with the self.params fix, at least 168400 steps
 - after 185000 steps Ltd is around 10, sometimes 20
 - and throughput compared to random is (1.138, 1.148) respectively
-. try not using Qjt, use local reward directly
-
+- try not using Qjt, use local reward directly
+- at 61584 steps, LOPT: 6.971 LNOPT-min: 5.001, throughput 1.168 model vs 1.144 random
 
 . cleaning up files, then move on to training on warehouse maps
 
@@ -299,3 +299,10 @@ a. why cant Lopt and Lnopt be 0
 - normalize delay, or cap max delay to -10
 - localize reward to 1 step away from pair
 - use QTRAN++ loss calculations
+
+## 8 FEB 2025
+clean up
+- saved models to trained_models/ folder
+
+1. test on warehouse map
+- use the 60K trained model to test

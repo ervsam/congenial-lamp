@@ -170,35 +170,36 @@ while steps < TRAIN_STEPS:
     batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2)
     batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
 
-    q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
-    if is_QTRAN_alt:
-        group_onehot = []
-        for group in groups:
-            subgroup_actions = []
-            for pair, act in zip(close_pairs, batch_onehot_actions):
-                if pair in group:
-                    subgroup_actions.append(act)
-            group_onehot.append(torch.stack(subgroup_actions))
+    ############ if using Q-JOINT ############
+    # q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
+    # if is_QTRAN_alt:
+    #     group_onehot = []
+    #     for group in groups:
+    #         subgroup_actions = []
+    #         for pair, act in zip(close_pairs, batch_onehot_actions):
+    #             if pair in group:
+    #                 subgroup_actions.append(act)
+    #         group_onehot.append(torch.stack(subgroup_actions))
     
-        selected_Qs = []
-        for q, act in zip(q_jt_alt, group_onehot):
-            selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().numpy()))
-        # selected_Q = torch.sum((q_jt_alt * batch_onehot_actions), dim=1)
+    #     selected_Qs = []
+    #     for q, act in zip(q_jt_alt, group_onehot):
+    #         selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().numpy()))
+    #     # selected_Q = torch.sum((q_jt_alt * batch_onehot_actions), dim=1)
 
-        logger.print("Q-joint predicted:")
-        for i in selected_Qs:
-            logger.print([round(j, 3) for j in i])
+    #     logger.print("Q-joint predicted:")
+    #     for i in selected_Qs:
+    #         logger.print([round(j, 3) for j in i])
 
-        # print Q'jt - Qjt
-        logger.print("Q'jt - Qjt:")
-        for i, group_q in enumerate(selected_Qs):
-            logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
-        logger.print()
-    else:
-        logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
+    #     # print Q'jt - Qjt
+    #     logger.print("Q'jt - Qjt:")
+    #     for i, group_q in enumerate(selected_Qs):
+    #         logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
+    #     logger.print()
+    # else:
+    #     logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
 
-        # print Q'jt - Qjt
-        logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
+    #     # print Q'jt - Qjt
+    #     logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
 
 
     ################################ INSERT (s, a, r) TO BUFFER ####################################
