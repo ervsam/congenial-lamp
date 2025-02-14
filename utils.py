@@ -144,6 +144,7 @@ def plot(x, ylabel, xlabel, filename):
     plt.plot(x)
     # plot running average
     plt.plot(np.convolve(x, np.ones(100)/100, mode='valid'))
+    plt.yscale('log')
     plt.ylabel(ylabel)
     plt.xlabel(xlabel)
     plt.savefig(filename)
@@ -323,15 +324,14 @@ def step(env, logger, throughput, q_vals, policy="random"):
     
     # while priorities are not feasible, sample new pairwise priorities
     tries = 0
-    MAX_TRIES = 2
+    MAX_TRIES = 100
     while tries < MAX_TRIES:
         tries += 1
         priorities, partial_prio, pred_value = sample_priorities(env, logger, env.get_close_pairs(), q_vals[0], policy=policy)
         
         # cycle unresolvable
         if priorities is None:
-            logger.print(
-                "Cycle unresolved, skipping instance\n")
+            logger.print("Cycle unresolved, skipping instance\n")
             env.reset()
             new_start, new_goals = env.starts, env.goals
             return None, None, None, None, None, throughput
@@ -603,3 +603,80 @@ def smoothen_paths(paths, smoothness=10):
         new_paths.append(new_path)
 
     return new_paths
+
+
+
+# %% WAREHOUSE MAP
+from matplotlib.colors import ListedColormap
+
+cmap = ListedColormap(["white", "black", "yellow", "red"])
+
+def generate_warehouse(rows, cols, num_agents, num_goals, seed=None):
+    np.random.seed(seed)
+
+    people = np.array(
+        [[2,2,0,2,2],
+        [2,2,0,2,2],
+        [2,2,0,2,2],
+        ]
+    )
+
+    shelves = np.array(
+        [[3]*10,
+        [1]*10,
+        [3]*10,
+        ]
+    )
+
+    hall_ver = np.array(
+        [[0],
+        [0],
+        [0],
+        ]
+    )
+
+    row = people
+
+    for j in range(cols):
+        row = np.concatenate((row, hall_ver, shelves), axis=1)
+
+    row = np.concatenate((row, hall_ver, people), axis=1)
+
+    hall_hor = np.array(
+        [[0]*len(row[0])]
+    )
+
+    warehouse = row
+
+    for i in range(rows-1):
+        warehouse = np.concatenate((warehouse, hall_hor, row), axis=0)
+
+    # pad the warehouse with a row of zeros
+    warehouse = np.pad(warehouse, 1, 'constant')
+
+    plt.imshow(warehouse, cmap=cmap, vmin=0, vmax=3)
+
+
+    # generate random starts and goals
+    station_locs = np.where(warehouse == 2)
+    station_locs = np.array(list(zip(station_locs[0], station_locs[1])))
+
+    # get possible goal locations
+    shelves_locs = np.where(warehouse == 3)
+    shelves_locs = np.array(list(zip(shelves_locs[0], shelves_locs[1])))
+
+    # generate randomly selected start and goal locations
+    np.random.shuffle(station_locs)
+    np.random.shuffle(shelves_locs)
+
+    start_locs = station_locs[:num_agents]
+
+    rng = np.random.default_rng()
+    rng.shuffle(shelves_locs)
+    goal_locs = np.array([[i] for i in shelves_locs[:num_agents].copy()])
+    for i in range(num_goals):
+        rng.shuffle(shelves_locs)
+        new_shelves = shelves_locs[:num_agents].copy()
+        goal_locs = np.concatenate((goal_locs, new_shelves[:, None, :]), axis=1)
+
+    return warehouse, start_locs, goal_locs

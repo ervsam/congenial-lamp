@@ -12,19 +12,34 @@ np.random.seed(0)
 
 
 class Environment:
-    def __init__(self, size=14, num_agents=4, obstacle_density=0.5, fov=7, window_size=3, logger=None):
+    def __init__(self, config, logger=None, grid_map_file=None, starts=None, goals=None, heuristic_map_file=None, start_loc_options=None, goal_loc_options=None):
+
+        root = os.path.dirname(__file__) + '/'
+
+        self.size_x = config['SIZE']
+        self.size_y = config['SIZE']
+        self.num_agents = config['NUM_AGENTS']
+        self.obstacle_density = config['OBSTACLE_DENSITY']
+        self.fov = config['FOV']
+        self.window_size = config['WINDOW_SIZE']
+
         self.logger = logger
-        self.colors = [plt.cm.hsv(i / num_agents) for i in range(num_agents)]
+        self.colors = [plt.cm.hsv(i / self.num_agents) for i in range(self.num_agents)]
 
+        # GRID MAP
+        # grid_map_file = os.path.join(os.path.dirname(__file__), grid_map_file)
+        if grid_map_file is not None:
+            self.grid_map = np.load(root+grid_map_file)
+            self.size_y = self.grid_map.shape[0] - 2
+            self.size_x = self.grid_map.shape[1] - 2
+        else:
+            self.grid_map = generate_map(size_x=self.size_x, size_y=self.size_y, obstacle_density=self.obstacle_density)
+            filename = 'random_grid_map_'
+            i = 1
+            while filename+str(i)+'.npy' in os.listdir():
+                i += 1
+            np.save(filename+str(i)+'.npy', self.grid_map)
 
-        self.size = size
-        self.num_agents = num_agents
-        self.obstacle_density = obstacle_density
-        self.fov = fov
-        self.window_size = window_size
-
-        self.grid_map = generate_map(
-            size=self.size, obstacle_density=self.obstacle_density)
 
         self.dynamic_constraints = dict()  # {(x, y, t): agent}
         self.edge_constraints = dict()  # {((1, 1, 2), (1, 2, 2)): agent}
@@ -48,65 +63,78 @@ class Environment:
         self._old_starts = []
         self._old_heur_fovs = []
 
-        # generate random starts and goals on empty cells
-        for agent in range(self.num_agents):
-            new_start = (np.random.randint(1, self.size),
-                         np.random.randint(1, self.size))
-            while self.grid_map[new_start[0], new_start[1]] == 1 or new_start in self.starts:
-                new_start = (np.random.randint(1, self.size),
-                             np.random.randint(1, self.size))
-            self.starts.append(new_start)
-            self.optimal_starts.append(new_start)
+        if start_loc_options:
+            self.start_loc_options = np.load(root+start_loc_options)
+        else:
+            self.start_loc_options = []
+            for y in range(self.size_y+2):
+                for x in range(self.size_x+2):
+                    if self.grid_map[y, x] == 0:
+                        self.start_loc_options.append((y, x))
+        if goal_loc_options:
+            self.goal_loc_options = np.load(root+goal_loc_options)
+        else:
+            self.goal_loc_options = []
+            for y in range(self.size_y+2):
+                for x in range(self.size_x+2):
+                    if self.grid_map[y, x] == 0:
+                        self.goal_loc_options.append((y, x))
 
-        for agent in range(self.num_agents):
-            goals = []
-            while len(goals) == 0 or np.abs(goals[-1][0] - self.starts[agent][0]) + np.abs(goals[-1][1] - self.starts[agent][1]) < self.window_size:
-                new_goal = (np.random.randint(1, self.size),
-                            np.random.randint(1, self.size))
-                while self.grid_map[new_goal[0], new_goal[1]] == 1:
-                    new_goal = (np.random.randint(1, self.size),
-                                np.random.randint(1, self.size))
-                goals.append(new_goal)
+        if starts is not None:
+            self.starts = starts.copy()
+            self.optimal_starts = starts.copy()
+        else:
+            # choose self.num_agents random starting positions
+            # self.starts = np.random.choice(self.start_loc_options, self.num_agents, replace=False)
+            idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
+            self.starts = [tuple(self.start_loc_options[ind]) for ind in idxs]
+            self.optimal_starts = self.starts.copy()
 
-            # add extras just in case
-            for _ in range(3):
-                new_goal = (np.random.randint(1, self.size),
-                            np.random.randint(1, self.size))
-                while self.grid_map[new_goal[0], new_goal[1]] == 1:
-                    new_goal = (np.random.randint(1, self.size),
-                                np.random.randint(1, self.size))
-                goals.append(new_goal)
+        if goals is not None:
+            self.goals = goals.copy()
+        else:
+            for agent in range(self.num_agents):
+                goals = []
+                
+                while len(goals) == 0 or np.abs(goals[-1][0] - self.starts[agent][0]) + np.abs(goals[-1][1] - self.starts[agent][1]) < self.window_size:
+                    idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                    new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                    goals += new_goal
 
-            self.goals.append(goals)
+                # add extras just in case
+                for _ in range(3):
+                    idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                    new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                    goals += new_goal
+
+                self.goals.append(goals)
 
         # generate heuristic map
-        if os.path.exists("heuristic_map.npy"):
+        if heuristic_map_file and os.path.exists(heuristic_map_file):
             logger.print("Environment.__init__: loading heuristic map from file")
-            self.heuristic_map = np.load("heuristic_map.npy", allow_pickle=True).item()
+            self.heuristic_map = np.load(root+heuristic_map_file, allow_pickle=True).item()
         else:
             # for each cell
-            for y in range(self.size+2):
-                for x in range(self.size+2):
+            for y in range(self.size_y+2):
+                for x in range(self.size_x+2):
                     # find length from shortest path from all other cells using A*
                     if self.grid_map[y, x] == 1:
                         continue
-                    self.logger.print("Environment.__init__: find shortest distance from",
-                                    (y, x), "to all other cells")
-                    self.heuristic_map[(y, x)] = np.zeros((self.size+2, self.size+2))
-                    for y2 in range(self.size+2):
-                        for x2 in range(self.size+2):
+                    self.logger.print("Environment.__init__: find shortest distance from", (y, x), "to all other cells")
+                    self.heuristic_map[(y, x)] = np.zeros((self.size_y+2, self.size_x+2))
+                    for y2 in range(self.size_y+2):
+                        for x2 in range(self.size_x+2):
                             if self.grid_map[y2, x2] == 1:
                                 self.heuristic_map[(y, x)][y2, x2] = np.inf
                                 continue
                             self.heuristic_map[(y, x)][y2, x2] = len(space_time_astar(self.grid_map, (y, x), [(y2, x2)], set(), set())) - 1
             
             # save heuristic map to file
-            np.save("heuristic_map.npy", self.heuristic_map)
+            np.save(heuristic_map_file, self.heuristic_map)
 
         # old heuristic map
         for agent in range(self.num_agents):
-            heur = self._get_fov(
-                self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
+            heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
             heur /= np.max(heur[heur < np.inf])
             self._old_heur_fovs.append(heur)
 
@@ -164,33 +192,22 @@ class Environment:
         self._old_heur_fovs = []
 
         # generate random starts and goals on empty cells
-        for agent in range(self.num_agents):
-            new_start = (np.random.randint(1, self.size),
-                         np.random.randint(1, self.size))
-            while self.grid_map[new_start[0], new_start[1]] == 1 or new_start in self.starts:
-                new_start = (np.random.randint(1, self.size),
-                             np.random.randint(1, self.size))
-            self.starts.append(new_start)
-            self.optimal_starts.append(new_start)
+        idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
+        self.starts = [tuple(self.start_loc_options[ind]) for ind in idxs]
+        self.optimal_starts = self.starts.copy()
 
         for agent in range(self.num_agents):
             goals = []
             while len(goals) == 0 or np.abs(goals[-1][0] - self.starts[agent][0]) + np.abs(goals[-1][1] - self.starts[agent][1]) < self.window_size:
-                new_goal = (np.random.randint(1, self.size),
-                            np.random.randint(1, self.size))
-                while self.grid_map[new_goal[0], new_goal[1]] == 1:
-                    new_goal = (np.random.randint(1, self.size),
-                                np.random.randint(1, self.size))
-                goals.append(new_goal)
+                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                goals += new_goal
 
             # add extras just in case
             for _ in range(3):
-                new_goal = (np.random.randint(1, self.size),
-                            np.random.randint(1, self.size))
-                while self.grid_map[new_goal[0], new_goal[1]] == 1:
-                    new_goal = (np.random.randint(1, self.size),
-                                np.random.randint(1, self.size))
-                goals.append(new_goal)
+                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                goals += new_goal
 
             self.goals.append(goals)
 
@@ -199,8 +216,7 @@ class Environment:
 
         # old heuristic map
         for agent in range(self.num_agents):
-            heur = self._get_fov(
-                self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
+            heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
             heur /= np.max(heur[heur < np.inf])
             self._old_heur_fovs.append(heur)
 
@@ -226,7 +242,8 @@ class Environment:
 
         for agent in priorities:
             # TODO: update ST A* to handle multiple goals
-            path = space_time_astar(self.grid_map, self.starts[agent], self.goals[agent], self.dynamic_constraints, self.edge_constraints)
+            goals_to_plan = self.goals[agent][:self.window_size]
+            path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
 
             if path is None:
                 return None, None
@@ -234,13 +251,12 @@ class Environment:
             temp_paths.append(path)
             self.actual_path_lengths[agent] = path
 
-            optimal_path = space_time_astar(self.grid_map, self.starts[agent], self.goals[agent], {}, {})
+            optimal_path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, {}, {})
 
             temp_opt_paths.append(optimal_path)
             self.optimal_path_lengths[agent] = optimal_path
 
-            self.optimal_starts[agent] = (
-                optimal_path[self.window_size][0], optimal_path[self.window_size][1])
+            self.optimal_starts[agent] = (optimal_path[self.window_size][0], optimal_path[self.window_size][1])
 
             # add path to dynamic constraints (only add the first window_size elements)
             for y, x, t in path[:self.window_size+1]:
@@ -248,8 +264,7 @@ class Environment:
             # add edge constraints (only add the first window_size elements)
             try:
                 for i in range(self.window_size):
-                    self.edge_constraints[(
-                        (path[i][0], path[i][1], path[i][2]), (path[i+1][0], path[i+1][1], path[i+1][2]))] = agent
+                    self.edge_constraints[((path[i][0], path[i][1], path[i][2]), (path[i+1][0], path[i+1][1], path[i+1][2]))] = agent
             except IndexError:
                 self.logger.print("IndexError: path is too short")
                 self.logger.print(path)
@@ -257,8 +272,7 @@ class Environment:
         # update the starts and goals
         for agent, path, opt_path in zip(priorities, temp_paths, temp_opt_paths):
             # update the start position of the agent
-            self.starts[agent] = (path[self.window_size]
-                                  [0], path[self.window_size][1])
+            self.starts[agent] = (path[self.window_size][0], path[self.window_size][1])
 
             # check if a goal is reached by going through the path
             goal_idx = 0
@@ -297,12 +311,9 @@ class Environment:
             #     self.goals[agent].append(new_goal)
             # OR while len(goal) is less than window_size
             while len(self.goals[agent]) <= self.window_size:
-                new_goal = (np.random.randint(1, self.size),
-                            np.random.randint(1, self.size))
-                while self.grid_map[new_goal[0], new_goal[1]] == 1:
-                    new_goal = (np.random.randint(1, self.size),
-                                np.random.randint(1, self.size))
-                self.goals[agent].append(new_goal)
+                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                self.goals[agent] += new_goal
 
             # WRONG: if i keep adding goals on each env.step(), goal list will keep increasing and ST A* will take longer to compute
             # # add extra just in case

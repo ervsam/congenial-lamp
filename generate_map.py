@@ -9,18 +9,18 @@ random.seed(0)
 np.random.seed(0)
 
 
-def generate_map(size, obstacle_density):
-    total_elements = size * size
+def generate_map(size_x, size_y, obstacle_density):
+    total_elements = size_x * size_y
     num_ones = int(total_elements * obstacle_density)
 
     # Initialize the array with all zeros
-    binary_array = np.zeros((size, size), dtype=int)
+    binary_array = np.zeros((size_x, size_y), dtype=int)
 
     # Randomly place 1's in the array while keeping track of the placed positions
     ones_positions = set()
     while len(ones_positions) < num_ones:
-        x = random.randint(0, size - 1)
-        y = random.randint(0, size - 1)
+        x = random.randint(0, size_x - 1)
+        y = random.randint(0, size_y - 1)
         if (x, y) not in ones_positions:
             binary_array[x, y] = 1
             ones_positions.add((x, y))

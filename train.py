@@ -11,49 +11,62 @@ import matplotlib.animation as animation
 import copy
 import time
 import yaml
+import os
 
 from utils import *
 from Environment import Environment
 from ReplayBuffer import ReplayBuffer, PrioritizedReplayBuffer
 from Trainer import Trainer
 
-import os
+np.random.seed(0)
+
 file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
 
 # Load the YAML config file
 with open(file_path, "r") as file:
     config_file = yaml.safe_load(file)
-
-np.random.seed(0)
-
+config = config_file["random"]
 
 # CONFIGS
-configs = config_file["training"]
+env_config = config["environment"]
+NUM_AGENTS = env_config["NUM_AGENTS"]
+FOV = env_config["FOV"]
 
-OVERFIT_TEST = configs["OVERFIT_TEST"]
-SIZE = configs["SIZE"]
-NUM_AGENTS = configs["NUM_AGENTS"]
-OBSTACLE_DENSITY = configs["OBSTACLE_DENSITY"]
-FOV = configs["FOV"]
-WINDOW_SIZE = configs["WINDOW_SIZE"]
-BATCH_SIZE = configs["BATCH_SIZE"]
-LAMBDA = configs["LAMBDA"]
-LR = float(configs["LR"])
-BUFFER_SIZE = configs["BUFFER_SIZE"]
-TRAIN_STEPS = float(configs["TRAIN_STEPS"])
-N_ACTIONS = configs["N_ACTIONS"]
+train_config = config["training"]
+OVERFIT_TEST = train_config["OVERFIT_TEST"]
+BATCH_SIZE = train_config["BATCH_SIZE"]
+LAMBDA = train_config["LAMBDA"]
+LR = float(train_config["LR"])
+BUFFER_SIZE = train_config["BUFFER_SIZE"]
+TRAIN_STEPS = float(train_config["TRAIN_STEPS"])
+N_ACTIONS = train_config["N_ACTIONS"]
+
+paths_config = config["paths"]
+GRID_MAP_FILE = paths_config["map_file"]
+HEURISTIC_MAP_FILE = paths_config["heur_file"]
+
+DIR = config["root"] + paths_config["results"]
+saved_model_path = DIR + 'q_net_model/'
+log_path = DIR + "log/"
+
+if not os.path.exists(saved_model_path):
+    os.makedirs(saved_model_path)
+
+if not os.path.exists(log_path):
+    os.makedirs(log_path)
 
 is_QTRAN_alt = True
 
 # %%
-logger = Logger("log.txt")
+logger = Logger(log_path+"log.txt")
 
-env = Environment(size=SIZE,
-                  num_agents=NUM_AGENTS,
-                  obstacle_density=OBSTACLE_DENSITY,
-                  fov=FOV,
-                  window_size=WINDOW_SIZE,
-                  logger=logger)
+env = Environment(env_config,
+                  logger=logger,
+                  grid_map_file=GRID_MAP_FILE,
+                  heuristic_map_file=HEURISTIC_MAP_FILE,
+                  start_loc_options=None,
+                  goal_loc_options=None,
+                  )
 
 trainer = Trainer(LR, BATCH_SIZE, NUM_AGENTS, FOV, is_QTRAN_alt, LAMBDA, env)
 
@@ -86,6 +99,9 @@ elif OVERFIT_TEST == 3:
                    [(2, 13), (9, 7), (1, 2)],
                    [(2, 14), (9, 7), (1, 2)],
                    ]
+    
+
+memory = {}
 
 # %% TRAINING LOOP
 new_start, new_goals = env.starts, env.goals
@@ -171,35 +187,35 @@ while steps < TRAIN_STEPS:
     batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
 
     ############ if using Q-JOINT ############
-    # q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
-    # if is_QTRAN_alt:
-    #     group_onehot = []
-    #     for group in groups:
-    #         subgroup_actions = []
-    #         for pair, act in zip(close_pairs, batch_onehot_actions):
-    #             if pair in group:
-    #                 subgroup_actions.append(act)
-    #         group_onehot.append(torch.stack(subgroup_actions))
+    q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action, [close_pairs], [groups], [len(partial_prio)])
+    if is_QTRAN_alt:
+        group_onehot = []
+        for group in groups:
+            subgroup_actions = []
+            for pair, act in zip(close_pairs, batch_onehot_actions):
+                if pair in group:
+                    subgroup_actions.append(act)
+            group_onehot.append(torch.stack(subgroup_actions))
     
-    #     selected_Qs = []
-    #     for q, act in zip(q_jt_alt, group_onehot):
-    #         selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().numpy()))
-    #     # selected_Q = torch.sum((q_jt_alt * batch_onehot_actions), dim=1)
+        selected_Qs = []
+        for q, act in zip(q_jt_alt, group_onehot):
+            selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().numpy()))
+        # selected_Q = torch.sum((q_jt_alt * batch_onehot_actions), dim=1)
 
-    #     logger.print("Q-joint predicted:")
-    #     for i in selected_Qs:
-    #         logger.print([round(j, 3) for j in i])
+        logger.print("Q-joint predicted:")
+        for i in selected_Qs:
+            logger.print([round(j, 3) for j in i])
 
-    #     # print Q'jt - Qjt
-    #     logger.print("Q'jt - Qjt:")
-    #     for i, group_q in enumerate(selected_Qs):
-    #         logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
-    #     logger.print()
-    # else:
-    #     logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
+        # print Q'jt - Qjt
+        logger.print("Q'jt - Qjt:")
+        for i, group_q in enumerate(selected_Qs):
+            logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
+        logger.print()
+    else:
+        logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
 
-    #     # print Q'jt - Qjt
-    #     logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
+        # print Q'jt - Qjt
+        logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
 
 
     ################################ INSERT (s, a, r) TO BUFFER ####################################
@@ -217,8 +233,11 @@ while steps < TRAIN_STEPS:
             set_s.update(pair)
         group_agents.append(list(set_s))
     for group in group_agents:
-        local_rewards.append(sum([-delays[agent] for agent in group]))
-        # local_rewards.append(1 / (sum([delays[agent] for agent in group]) + 1))
+        # local_rewards.append(sum([-delays[agent] for agent in group]))
+        # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
+        local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10 ))
+
+
 
     # global_reward = sum([-x/max_delay for x in env.get_delays()])/env.num_agents
     # global_reward = 1 / (sum(env.get_delays()) + 1)
@@ -232,7 +251,7 @@ while steps < TRAIN_STEPS:
     buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals)
 
     if steps % 100 == 0:
-        plot(losses, ylabel="Total Loss", xlabel="Steps", filename="loss_plot.png")
+        plot(losses, ylabel="Total Loss", xlabel="Steps", filename=DIR + "loss_plot.png")
         # plot(throughput, ylabel="Throughput", xlabel="Steps", filename="throughput_plot.png")
 
         # plot ltds, lopts, lnopts in one plot
@@ -244,13 +263,13 @@ while steps < TRAIN_STEPS:
         plt.ylabel("Loss")
         plt.legend()
         plt.title("Loss Components")
-        plt.savefig("loss_components_plot.png")
+        plt.savefig(DIR+"loss_components_plot.png")
         plt.close()
 
 
     # save model
     if steps % 5000 == 0:
-        torch.save(trainer.q_net.state_dict(), f'q_net_model/q_net_{steps}.pth')
+        torch.save(trainer.q_net.state_dict(), saved_model_path+f"q_net_{steps}.pth")
         # torch.save(trainer.qjoint_net.state_dict(), f'qjoint_net_{i}.pth')
         # torch.save(trainer.vnet.state_dict(), f'vnet_{i}.pth')
 
@@ -284,7 +303,7 @@ while steps < TRAIN_STEPS:
         "____________________________________________________________________________")
     
     if steps % 25000 == 0:
-        logger.set_filename(f"log_{steps}.txt")
+        logger.set_filename(log_path + f"log_{steps}.txt")
 
 # %%
 # given array of paths, visualize the path of all the agents in a gif, where each frame is the agent taking its step

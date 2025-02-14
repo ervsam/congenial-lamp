@@ -13,7 +13,7 @@ class Trainer:
 
         self.env = copy.deepcopy(env)
 
-        self.use_local_rewards = True
+        self.use_local_rewards = False
 
         self.q_net = QNetwork()
         if not self.use_local_rewards:
@@ -21,7 +21,7 @@ class Trainer:
             self.fixed_qjoint_net = QJoint()
         self.vnet = VJoint()
 
-        self.update_every = 50
+        self.update_every = 10
         self.counter = 0
 
         self.lr = LR
@@ -133,8 +133,8 @@ class Trainer:
                 for q, pair in zip(qvals, close_pairs):
                     if pair in group:
                         tmp_qs.append(q)
-                group_qvals.append(sum(tmp_qs))
-            q_prime.append(group_qvals)
+                q_prime.append(sum(tmp_qs))
+            # q_prime.append(group_qvals)
 
             max_qvals = batch_max_q[start:start+num]
             for group in groups:
@@ -147,7 +147,7 @@ class Trainer:
             start += num
 
         
-        # q_prime = torch.stack(q_prime).unsqueeze(1)
+        q_prime = torch.stack(q_prime).unsqueeze(1)
         q_prime_max = torch.stack(q_prime_max).unsqueeze(1)
 
         # CALCULATE LOSSES
@@ -297,7 +297,11 @@ class Trainer:
                         delays = self.env.get_delays()
                         
                         for group in group_agents:
-                            local_rewards.append(sum([-delays[agent] for agent in group]))
+                            # local_rewards.append(sum([-delays[agent] for agent in group]))
+                            # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
+                            local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10 ))
+
+
 
                     batch_max_local_rewards += local_rewards
 
@@ -447,7 +451,11 @@ class Trainer:
                                         group_agents.append(list(set_s))
                                     for group in group_agents:
                                         if ori_pair[0] in group:
-                                            rew = sum([-delays[agent] for agent in group])
+                                            # rew = sum([-delays[agent] for agent in group])
+                                            # rew = 10 / (sum([delays[agent] for agent in group]) + 1)
+                                            rew = (1.1 ** -(sum([delays[agent] for agent in group])) * 10 )
+
+
 
                                 if tuple(starts) not in self.memory:
                                     self.memory[tuple(starts)] = {}
@@ -494,6 +502,18 @@ class Trainer:
                 td_errors = b + c
 
 
+            # tmp = []
+            # for q in q_prime:
+            #     tmp += q
+            # q_prime = torch.stack(tmp).unsqueeze(1)
+            tmp = []
+            for idx, num in enumerate(num_pairs_in_group):
+                tmp += [q_prime[idx]] * num
+            q_prime = torch.stack(tmp)
+
+            print("q_prime:", q_prime.shape)
+            print("vtot:", vtot.shape)
+
             tmp = []
             start = 0
             for num in num_n_pairs:
@@ -501,6 +521,7 @@ class Trainer:
                 tmp.append(Q)
                 start += num
             td_errors = tmp # b x N_ACTIONS
+
         else:
             # q_jt : b x 'groups' x 1
             tmp = []

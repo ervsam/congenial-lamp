@@ -306,3 +306,12 @@ clean up
 
 1. test on warehouse map
 - use the 60K trained model to test
+
+## 13 FEB 2025
+1. train.py
+. cleaning up files, then move on to training on warehouse maps
+
+2. 
+- train using epsilon greedy
+- normalize delay, or cap max delay to -10
+- localize reward to 1 step away from pair

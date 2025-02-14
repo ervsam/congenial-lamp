@@ -20,7 +20,6 @@ from Trainer import Trainer
 # set np seed
 np.random.seed(0)
 
-
 OVERFIT_TEST = 3
 
 SIZE = 14
@@ -41,12 +40,16 @@ is_QTRAN_alt = True
 # %%
 logger = Logger("overfit.txt")
 
-env = Environment(size=SIZE,
+env = Environment(size_x=SIZE,
+                  size_y=SIZE,
                   num_agents=NUM_AGENTS,
                   obstacle_density=OBSTACLE_DENSITY,
                   fov=FOV,
                   window_size=WINDOW_SIZE,
-                  logger=logger)
+                  logger=logger,
+                  grid_map_file=None,
+                  starts=None, goals=None,
+                  heuristic_map_file="heuristic_map.npy")
 
 # buffer = ReplayBuffer(buffer_size=BUFFER_SIZE)
 buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE)
