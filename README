@@ -315,3 +315,65 @@ clean up
 - train using epsilon greedy
 - normalize delay, or cap max delay to -10
 - localize reward to 1 step away from pair
+
+## 14 FEB 2025
+1. use Qjt
+- decided to use Qjt because saving it is a terrible idea. too many combinations, if its possible to save them then its possible to just do a look up, no need for training.
+. see if Qjt has expressive enough by just training Qjt first
+
+2. use exp(a, delay) as reward
+- figured we need to normalize delay to help with training
+- small value makes gradient disappear
+- 1.1 ** -(sum([delays[agent] for agent in group])) * 10
+
+3. training on warehouse map
+- training on 25 agents
+. training on warehouse map
+. testing 15K model with 27 agents 
+
+4. use PBS for hard instances
+- implemented in utils.step
+. training on random_w_PBS with 22 agents
+
+5. TODO
+- localize reward to 1 step away from pair
+
+
+## 15 FEB 2025
+1. training on warehouse map
+. test results:
+- 28 agents
+- model throughput:
+- random throughput:
+
+2. use PBS for hard instances
+- fixing problems with implementation
+- low_level_search in util should accept multiple goals like st_astar
+- then training on random_w_PBS with 20 agents
+
+3. use Qjt
+. see if Qjt has expressive enough by just training Qjt first
+
+4. TODO
+- localize reward to 1 step away from pair
+
+## 17 FEB 2025
+1. training on warehouse map 25 agents
+. test results:
+- 28 agents
+- model throughput:
+- random throughput:
+
+2. use PBS for hard instances
+. assert new_start is not None
+
+3. use Qjt
+. see if Qjt has expressive enough by just training Qjt first
+
+4. TODO
+- localize reward to 1 step away from pair
+
+
+# meet updates
+1. use Qjt
+2. use exp(1.1, delay)*10 as reward

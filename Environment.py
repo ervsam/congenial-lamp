@@ -10,21 +10,10 @@ from utils import *
 # set np seed
 np.random.seed(0)
 
-
 class Environment:
     def __init__(self, config, logger=None, grid_map_file=None, starts=None, goals=None, heuristic_map_file=None, start_loc_options=None, goal_loc_options=None):
 
         root = os.path.dirname(__file__) + '/'
-
-        self.size_x = config['SIZE']
-        self.size_y = config['SIZE']
-        self.num_agents = config['NUM_AGENTS']
-        self.obstacle_density = config['OBSTACLE_DENSITY']
-        self.fov = config['FOV']
-        self.window_size = config['WINDOW_SIZE']
-
-        self.logger = logger
-        self.colors = [plt.cm.hsv(i / self.num_agents) for i in range(self.num_agents)]
 
         # GRID MAP
         # grid_map_file = os.path.join(os.path.dirname(__file__), grid_map_file)
@@ -33,6 +22,10 @@ class Environment:
             self.size_y = self.grid_map.shape[0] - 2
             self.size_x = self.grid_map.shape[1] - 2
         else:
+            self.obstacle_density = config['OBSTACLE_DENSITY']
+            self.size_x = config['SIZE']
+            self.size_y = config['SIZE']
+
             self.grid_map = generate_map(size_x=self.size_x, size_y=self.size_y, obstacle_density=self.obstacle_density)
             filename = 'random_grid_map_'
             i = 1
@@ -40,6 +33,12 @@ class Environment:
                 i += 1
             np.save(filename+str(i)+'.npy', self.grid_map)
 
+        self.num_agents = config['NUM_AGENTS']
+        self.fov = config['FOV']
+        self.window_size = config['WINDOW_SIZE']
+
+        self.logger = logger
+        self.colors = [plt.cm.hsv(i / self.num_agents) for i in range(self.num_agents)]
 
         self.dynamic_constraints = dict()  # {(x, y, t): agent}
         self.edge_constraints = dict()  # {((1, 1, 2), (1, 2, 2)): agent}
@@ -57,7 +56,6 @@ class Environment:
         self.goal_reached = 0
         self.optimal_goal_reached = 0
 
-        self.heuristic_map = dict()
 
         self._old_goals = []
         self._old_starts = []
@@ -82,54 +80,21 @@ class Environment:
 
         if starts is not None:
             self.starts = starts.copy()
-            self.optimal_starts = starts.copy()
         else:
-            # choose self.num_agents random starting positions
-            # self.starts = np.random.choice(self.start_loc_options, self.num_agents, replace=False)
-            idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
-            self.starts = [tuple(self.start_loc_options[ind]) for ind in idxs]
-            self.optimal_starts = self.starts.copy()
+            self.starts = self._get_start_locs()
+        self.optimal_starts = self.starts.copy()
 
         if goals is not None:
             self.goals = goals.copy()
         else:
-            for agent in range(self.num_agents):
-                goals = []
-                
-                while len(goals) == 0 or np.abs(goals[-1][0] - self.starts[agent][0]) + np.abs(goals[-1][1] - self.starts[agent][1]) < self.window_size:
-                    idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
-                    new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
-                    goals += new_goal
-
-                # add extras just in case
-                for _ in range(3):
-                    idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
-                    new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
-                    goals += new_goal
-
-                self.goals.append(goals)
+            self.goals = self._get_goals_locs()
 
         # generate heuristic map
         if heuristic_map_file and os.path.exists(heuristic_map_file):
             logger.print("Environment.__init__: loading heuristic map from file")
             self.heuristic_map = np.load(root+heuristic_map_file, allow_pickle=True).item()
         else:
-            # for each cell
-            for y in range(self.size_y+2):
-                for x in range(self.size_x+2):
-                    # find length from shortest path from all other cells using A*
-                    if self.grid_map[y, x] == 1:
-                        continue
-                    self.logger.print("Environment.__init__: find shortest distance from", (y, x), "to all other cells")
-                    self.heuristic_map[(y, x)] = np.zeros((self.size_y+2, self.size_x+2))
-                    for y2 in range(self.size_y+2):
-                        for x2 in range(self.size_x+2):
-                            if self.grid_map[y2, x2] == 1:
-                                self.heuristic_map[(y, x)][y2, x2] = np.inf
-                                continue
-                            self.heuristic_map[(y, x)][y2, x2] = len(space_time_astar(self.grid_map, (y, x), [(y2, x2)], set(), set())) - 1
-            
-            # save heuristic map to file
+            self.heuristic_map = self._get_heuristic_map()
             np.save(heuristic_map_file, self.heuristic_map)
 
         # old heuristic map
@@ -138,11 +103,54 @@ class Environment:
             heur /= np.max(heur[heur < np.inf])
             self._old_heur_fovs.append(heur)
 
-        self.get_DHCheur()
+        self.DHC_heur = self._get_DHC_heur()
 
-    def get_DHCheur(self):
+    def _get_start_locs(self):
+        # choose self.num_agents random starting positions
+        idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
+        starts = [tuple(self.start_loc_options[ind]) for ind in idxs]
+        return starts
+
+    def _get_goals_locs(self):
+        goals = []
+        for agent in range(self.num_agents):
+            goals_per_agent = []
+            
+            while len(goals_per_agent) == 0 or np.abs(goals_per_agent[-1][0] - self.starts[agent][0]) + np.abs(goals_per_agent[-1][1] - self.starts[agent][1]) < self.window_size:
+                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                goals_per_agent += new_goal
+
+            # add extras just in case
+            for _ in range(3):
+                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                goals_per_agent += new_goal
+
+            goals.append(goals_per_agent)
+        return goals
+
+    def _get_heuristic_map(self):
+        heuristic_map = dict()
+        # for each cell
+        for y in range(self.size_y+2):
+            for x in range(self.size_x+2):
+                # find length from shortest path from all other cells using A*
+                if self.grid_map[y, x] == 1:
+                    continue
+                self.logger.print("Environment.__init__: find shortest distance from", (y, x), "to all other cells")
+                heuristic_map[(y, x)] = np.zeros((self.size_y+2, self.size_x+2))
+                for y2 in range(self.size_y+2):
+                    for x2 in range(self.size_x+2):
+                        if self.grid_map[y2, x2] == 1:
+                            heuristic_map[(y, x)][y2, x2] = np.inf
+                            continue
+                        heuristic_map[(y, x)][y2, x2] = len(space_time_astar(self.grid_map, (y, x), [(y2, x2)], set(), set())) - 1
+        return heuristic_map
+
+    def _get_DHC_heur(self):
         # DHC HEURISTIC MAP
-        self.DHC_heur = []
+        DHC_heur = []
         for agent in range(self.num_agents):
             # number of goals, 4 directions, map size
             heur = np.zeros((len(self.goals[agent]), 4, *self.grid_map.shape))
@@ -167,13 +175,13 @@ class Environment:
                             if x < self.grid_map.shape[0]-1 and heur_map[y, x+1] < heur_map[y, x]:
                                 assert heur_map[y, x+1] == heur_map[y, x]-1
                                 heur[i, 3, y, x] = 1
-            self.DHC_heur.append(heur)
+            DHC_heur.append(heur)
+        return DHC_heur
 
     def reset(self, num_agents=None):
         if num_agents is not None:
             self.num_agents = num_agents
             self.colors = [plt.cm.hsv(i / num_agents) for i in range(num_agents)]
-
 
         self.dynamic_constraints = dict()  # {(x, y, t): agent}
         self.edge_constraints = dict()  # {((1, 1, 2), (1, 2, 2)): agent}
@@ -192,26 +200,12 @@ class Environment:
         self._old_heur_fovs = []
 
         # generate random starts and goals on empty cells
-        idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
-        self.starts = [tuple(self.start_loc_options[ind]) for ind in idxs]
+        self.starts = self._get_start_locs()
         self.optimal_starts = self.starts.copy()
 
-        for agent in range(self.num_agents):
-            goals = []
-            while len(goals) == 0 or np.abs(goals[-1][0] - self.starts[agent][0]) + np.abs(goals[-1][1] - self.starts[agent][1]) < self.window_size:
-                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
-                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
-                goals += new_goal
+        self.goals = self._get_goals_locs()
 
-            # add extras just in case
-            for _ in range(3):
-                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
-                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
-                goals += new_goal
-
-            self.goals.append(goals)
-
-        self.get_DHCheur()
+        self.DHC_heur = self._get_DHC_heur()
 
 
         # old heuristic map
@@ -241,6 +235,8 @@ class Environment:
         temp_opt_paths = []
 
         for agent in priorities:
+            assert len(priorities) == self.num_agents, "Environment.step(): priorities length is not equal to number of agents"
+            
             # TODO: update ST A* to handle multiple goals
             goals_to_plan = self.goals[agent][:self.window_size]
             path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
@@ -327,7 +323,7 @@ class Environment:
             self.paths[agent] = path[:self.window_size+1]
 
         # update the heuristic map
-        # self.get_DHCheur()
+        # self.DHC_heur = self._get_DHC_heur()
 
         return self.starts, self.goals
 
@@ -504,7 +500,6 @@ class Environment:
         return list(edge_groups.values())
 
     def show_current_state(self):
-
         plt.imshow(self.grid_map, cmap='gray_r')
 
         # Scatter plot of agent starting positions

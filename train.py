@@ -25,12 +25,11 @@ file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
 # Load the YAML config file
 with open(file_path, "r") as file:
     config_file = yaml.safe_load(file)
-config = config_file["random"]
+
+config = config_file["random_w_PBS"]
 
 # CONFIGS
 env_config = config["environment"]
-NUM_AGENTS = env_config["NUM_AGENTS"]
-FOV = env_config["FOV"]
 
 train_config = config["training"]
 OVERFIT_TEST = train_config["OVERFIT_TEST"]
@@ -68,7 +67,7 @@ env = Environment(env_config,
                   goal_loc_options=None,
                   )
 
-trainer = Trainer(LR, BATCH_SIZE, NUM_AGENTS, FOV, is_QTRAN_alt, LAMBDA, env)
+trainer = Trainer(LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env)
 
 # buffer = ReplayBuffer(buffer_size=BUFFER_SIZE)
 buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE)
@@ -100,9 +99,6 @@ elif OVERFIT_TEST == 3:
                    [(2, 14), (9, 7), (1, 2)],
                    ]
     
-
-memory = {}
-
 # %% TRAINING LOOP
 new_start, new_goals = env.starts, env.goals
 steps = 0
@@ -151,7 +147,7 @@ while steps < TRAIN_STEPS:
     logger.print("Time to solve instance:", time.time()-timestep_start, "\n")
 
     # print Q'jt based on action taken
-    q_prime = sum([q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))])
+    q_prime = [sum([q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))])]
     if len(groups) > 1:
         chosen_q = [q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))]
         group_q_prime = []
@@ -180,8 +176,8 @@ while steps < TRAIN_STEPS:
     actions = torch.stack(list(partial_prio.values()))
     # turn actions to one hot encoding and append to pair_enc
     tmp = []
-    for pair_enc in pair_enc:
-        tmp += pair_enc
+    for enc in pair_enc:
+        tmp += enc
     pair_enc = torch.stack(tmp)
     batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2)
     batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
@@ -235,7 +231,7 @@ while steps < TRAIN_STEPS:
     for group in group_agents:
         # local_rewards.append(sum([-delays[agent] for agent in group]))
         # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
-        local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10 ))
+        local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
 
 
 

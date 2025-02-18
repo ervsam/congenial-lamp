@@ -308,26 +308,64 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random'):
 
 
 def step(env, logger, throughput, q_vals, policy="random"):
-    '''
-    1. sample priority ordering using q_vals
-    2. 
+    """
+    Executes a single step in the environment by determining priority ordering for agents and updating their positions accordingly.
+
+    Parameters
+    ==========
+    env : Environment
+        The multi-agent environment in which agents navigate and interact.
+    logger : Logger
+        Utility for logging messages and debugging information.
+    throughput : list
+        A list tracking the number of agents that reach their goals.
+    q_vals : array or None
+        Q-values used to sample priority ordering. If None, a default ordering is used.
+    policy : str, optional (default="random")
+        The policy used to sample priorities (e.g., "random" or another predefined method).
+
+    Process
+    =======
+    1. If `q_vals` is None, assign default priorities and take an environment step.
+    2. Otherwise, attempt to sample feasible priorities using `q_vals`.
+    3. If a cycle is detected, reset the environment and skip the instance.
+    4. If priorities are not feasible, resample up to `MAX_TRIES` times.
+    5. If a feasible priority ordering is found, take a step in the environment.
+    6. If after `MAX_TRIES` no feasible ordering is found, reset the environment.
 
     Returns
     =======
-        
-    '''
+    priorities : list or None
+        The sampled priority ordering of agents, or None if unresolvable.
+    partial_prio : list or None
+        Partial priority information from sampling, or None if unresolvable.
+    pred_value : float or None
+        Predicted value from priority sampling, or None if unresolvable.
+    new_start : list or None
+        Updated agent start positions, or None if unresolvable.
+    new_goals : list or None
+        Updated agent goal positions, or None if unresolvable.
+    throughput : list
+        Updated throughput list tracking goal completions.
+    """
 
     if q_vals is None:
         priorities = list(range(env.num_agents))
         new_start, new_goals = env.step(priorities)
+
+        logger.print("Time to env.step:", time.time()-start_time)
+        if new_start is not None:
+            throughput.append(env.goal_reached)
         return None, None, None, new_start, new_goals, throughput
+
+    close_pairs = env.get_close_pairs()
     
     # while priorities are not feasible, sample new pairwise priorities
     tries = 0
     MAX_TRIES = 100
     while tries < MAX_TRIES:
         tries += 1
-        priorities, partial_prio, pred_value = sample_priorities(env, logger, env.get_close_pairs(), q_vals[0], policy=policy)
+        priorities, partial_prio, pred_value = sample_priorities(env, logger, close_pairs, q_vals[0], policy=policy)
         
         # cycle unresolvable
         if priorities is None:
@@ -346,10 +384,42 @@ def step(env, logger, throughput, q_vals, policy="random"):
         logger.print("Priorities not feasible, resampling\n")
     # problem instance unresolvable
     if tries == MAX_TRIES:
-        logger.print(f"Priorities not feasible after {MAX_TRIES} tries, skipping instance\n")
-        env.reset()
-        new_start, new_goals = env.starts, env.goals
-        return None, None, None, None, None, throughput
+        logger.print(f"Priorities not feasible after {MAX_TRIES} tries")
+        # try using PBS
+        logger.print(f"running PBS...")
+        result = priority_based_search(env.grid_map, env.starts, env.goals)
+        if result == "No Solution":
+            logger.print("No solution found using PBS, skipping instance\n")
+            env.reset()
+            new_start, new_goals = env.starts, env.goals
+            return None, None, None, None, None, throughput
+
+        else:
+            plan, priority_order = result
+            graph = defaultdict(list)
+            for agent in range(env.num_agents):
+                graph[agent] = []
+            for a, b in priority_order:
+                graph[a].append(b)
+                # if b not in graph:
+                #     graph[b] = []
+            priorities = topological_sort_pbs(graph)
+
+            print(priorities)
+            start_time = time.time()
+            new_start, new_goals = env.step(priorities)
+            logger.print("Time to env.step:", time.time()-start_time)
+
+            assert new_start is not None
+
+            partial_prio = dict()
+            pred_value = dict()
+            for i, (agent, neighbor) in enumerate(close_pairs):
+                action = int(priorities.index(agent) > priorities.index(neighbor))
+                partial_prio[(agent, neighbor)] = torch.tensor([action])
+                pred_value[(agent, neighbor)] = q_vals[0][i][action]
+                
+            logger.print("Solution found using PBS\n")
 
     return priorities, partial_prio, pred_value, new_start, new_goals, throughput
 
@@ -366,9 +436,9 @@ class Node:
         self.priority_order = set()  # Partial order of agent priorities
         self.cost = float('inf')  # Cost of the plan
 
-def low_level_search(start, goal, grid, constraints, agent_id, max_time=100):
+def low_level_search(start, goals, grid, constraints, agent_id, max_time=100):
     """A* search for a single agent that respects constraints."""
-    def heuristic(pos):
+    def heuristic(pos, goal):
         return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
 
     def get_neighbors(pos):
@@ -380,8 +450,11 @@ def low_level_search(start, goal, grid, constraints, agent_id, max_time=100):
                 neighbors.append((nx, ny))
         return neighbors
 
+    goals = copy.deepcopy(goals)
+    goal = goals.pop(0)
+
     open_set = []
-    heapq.heappush(open_set, (heuristic(start), 0, start, []))
+    heapq.heappush(open_set, (heuristic(start, goal), 0, start, []))
     visited = set()
 
     while open_set:
@@ -392,7 +465,15 @@ def low_level_search(start, goal, grid, constraints, agent_id, max_time=100):
 
         # Goal check
         if current == goal:
-            return path + [current]
+            # handle next goal
+            if goals:
+                goal = goals.pop(0)
+                open_set = []
+                heapq.heappush(open_set, (heuristic(current, goal), 0, current, []))
+                visited = set()
+
+            else:
+                return path + [current]
 
         # Expand neighbors
         for neighbor in get_neighbors(current):
@@ -418,7 +499,7 @@ def low_level_search(start, goal, grid, constraints, agent_id, max_time=100):
                             break
 
             if not conflict:
-                heapq.heappush(open_set, (g + heuristic(neighbor), g + 1, neighbor, path + [current]))
+                heapq.heappush(open_set, (g + heuristic(neighbor, goal), g + 1, neighbor, path + [current]))
 
 
     return None  # No path found
@@ -528,24 +609,31 @@ def topological_sort_pbs(graph):
         raise ValueError("Graph has a cycle and cannot be topologically sorted.")
 
 
-def priority_based_search(grid, starts, goals):
+def priority_based_search(grid, starts, goals, max_iter=10000):
     """Main PBS algorithm."""
     root = Node()
-    for i, start in enumerate(starts):
-        path = low_level_search(start, goals[i], grid, [], i)
+    for agent, start in enumerate(starts):
+        # path to next goal
+        path = low_level_search(start, goals[agent], grid, [], agent)
         if path is None:
             return "No Solution"
-        root.plan[i] = path
+        root.plan[agent] = path
 
     root.cost = sum(len(path) for path in root.plan.values())
     stack = [root]
 
+    iteration = 0
     while stack:
+        if iteration >= max_iter:
+            print("MAX PBS ITERATION REACHED")
+            return "No Solution"
+        iteration += 1
+        
         node = stack.pop()
         collision = detect_collision(node.plan)
 
         if not collision:
-            return node.plan, node.priority_order
+            return (node.plan, node.priority_order)
 
         new_nodes = []
         ai, aj = collision['agents'][:2]  # Handle the first collision

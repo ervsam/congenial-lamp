@@ -8,7 +8,7 @@ from utils import *
 from Model import QNetwork, QJoint, VJoint
 
 class Trainer:
-    def __init__(self, LR, BATCH_SIZE, NUM_AGENTS, FOV, is_QTRAN_alt, LAMBDA, env):
+    def __init__(self, LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env):
         self.hidden_dim = 32
 
         self.env = copy.deepcopy(env)
@@ -26,8 +26,8 @@ class Trainer:
 
         self.lr = LR
         self.batch_size = BATCH_SIZE
-        self.num_agents = NUM_AGENTS
-        self.fov = FOV
+        self.num_agents = env.num_agents
+        self.fov = env.fov
         self.is_QTRAN_alt = is_QTRAN_alt
         self.LAMBDA = LAMBDA
 
@@ -85,6 +85,7 @@ class Trainer:
         for pp in batch_partial_prio:
             batch_actions += list(pp.values())
         batch_actions = torch.stack(batch_actions)
+
         # batch_actions = torch.tensor([list(pp.values()) for pp in batch_partial_prio]).view(-1, 1)
         batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze()
 
