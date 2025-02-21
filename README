@@ -360,20 +360,40 @@ clean up
 ## 17 FEB 2025
 1. training on warehouse map 25 agents
 . test results:
-- 28 agents
-- model throughput:
-- random throughput:
+- 35 agents
+- model throughput: 4.385
+- random throughput: 4.32
 
 2. use PBS for hard instances
-. assert new_start is not None
+. fixing implementation
+- assert new_start is not None
+- after reaching one goal, push to heap (open_set, (heuristic(current, goal), g, current, path)) not (open_set, (heuristic(current, goal), 0, current, path))
+- order of actions in st_astar has to match PBS implementation since tie break is going to affect PP
+. training on random_w_PBS with 19 agents
 
 3. use Qjt
 . see if Qjt has expressive enough by just training Qjt first
 
 4. TODO
 - localize reward to 1 step away from pair
+- use curriculum learning (number of agents)
+
+
+## 18 FEB 2025
+1. use PBS for hard instances
+. fixing implementation
+- should only replan for aj where there exist ak < aj in partial prio N
+
+
+## 19 FEB 2025
+1. use PBS for hard instances
+- fixed, plan conflict free only for window_size time step
+
 
 
 # meet updates
 1. use Qjt
 2. use exp(1.1, delay)*10 as reward
+- fix range to [0, 10]
+- makes Qjt easier to learn and converge to <1
+3. Q'jt is very small and V(s) close to reward because there isnt much difference between Q'jt(s, ui) and Q'jt(s, uj), meaning taking joint action ui vs uj dont make that much of a difference

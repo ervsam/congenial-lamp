@@ -95,7 +95,7 @@ class Environment:
             self.heuristic_map = np.load(root+heuristic_map_file, allow_pickle=True).item()
         else:
             self.heuristic_map = self._get_heuristic_map()
-            np.save(heuristic_map_file, self.heuristic_map)
+            np.save(root+heuristic_map_file, self.heuristic_map)
 
         # old heuristic map
         for agent in range(self.num_agents):
@@ -241,6 +241,8 @@ class Environment:
             goals_to_plan = self.goals[agent][:self.window_size]
             path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
 
+            print(f"Agent {agent}:", path)
+
             if path is None:
                 return None, None
 
@@ -255,12 +257,18 @@ class Environment:
             self.optimal_starts[agent] = (optimal_path[self.window_size][0], optimal_path[self.window_size][1])
 
             # add path to dynamic constraints (only add the first window_size elements)
-            for y, x, t in path[:self.window_size+1]:
+            for y, x, t in path:
+                if t > self.window_size:
+                    break
                 self.dynamic_constraints[(y, x, t)] = agent
             # add edge constraints (only add the first window_size elements)
             try:
-                for i in range(self.window_size):
-                    self.edge_constraints[((path[i][0], path[i][1], path[i][2]), (path[i+1][0], path[i+1][1], path[i+1][2]))] = agent
+                # for i in range(self.window_size):
+                for t, pos in enumerate(path):
+                    if t > self.window_size:
+                        break
+                    edge = ((path[t][0], path[t][1], path[t][2]), (path[t+1][0], path[t+1][1], path[t+1][2]))
+                    self.edge_constraints[edge] = agent
             except IndexError:
                 self.logger.print("IndexError: path is too short")
                 self.logger.print(path)

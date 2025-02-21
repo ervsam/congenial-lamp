@@ -27,6 +27,9 @@ def is_valid(old_x, old_y, x, y, t, grid, dynamic_constraints, edge_constraints)
     if grid[x, y] == 1:
         return False
     if (x, y, t) in dynamic_constraints:
+        if dynamic_constraints[(x, y, t)] == 0:
+            print("st_astar: dynamic constraint violated", x, y, t)
+
         return False
     # edge constraints
     if ((x, y, t-1), (old_x, old_y, t)) in edge_constraints:
@@ -36,6 +39,8 @@ def is_valid(old_x, old_y, x, y, t, grid, dynamic_constraints, edge_constraints)
 
 
 def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
+    counter = 0  # Global counter
+
     goals = copy.deepcopy(goals)
     goal = goals.pop(0)
     start_node = Node(start[0], start[1], 0, 0, heuristic(start[0], start[1], goal[0], goal[1]))
@@ -44,10 +49,11 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
     open_list = []
     closed_list = set()
 
-    heapq.heappush(open_list, start_node)
+    heapq.heappush(open_list, (start_node, counter))
+    counter += 1
 
     while open_list:
-        current_node = heapq.heappop(open_list)
+        current_node, _ = heapq.heappop(open_list)
 
         # IF GOAL IS FOUND
         if (current_node.x, current_node.y) == (goal_node.x, goal_node.y):
@@ -59,15 +65,16 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
                                 heuristic(current_node.x, current_node.y, goal_node.x, goal_node.y), current_node.parent)
 
                 open_list = []
-                heapq.heappush(open_list, new_node)
-                current_node = heapq.heappop(open_list)
+                heapq.heappush(open_list, (new_node, counter))
+                counter += 1
+
+                current_node, _ = heapq.heappop(open_list)
                 closed_list = set()
 
             else:
                 path = []
                 while current_node:
-                    path.append(
-                        (current_node.x, current_node.y, current_node.t))
+                    path.append((current_node.x, current_node.y, current_node.t))
                     current_node = current_node.parent
                 return path[::-1]
 
@@ -78,7 +85,7 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
 
         closed_list.add((current_node.x, current_node.y, current_node.t))
 
-        actions = [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]
+        actions = [(0, 0), (0, 1), (1, 0), (0, -1), (-1, 0)]
         for dx, dy in actions:
             new_x = current_node.x + dx
             new_y = current_node.y + dy
@@ -89,8 +96,9 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
                                 heuristic(new_x, new_y, goal_node.x, goal_node.y), current_node)
 
                 if (new_x, new_y, new_t) not in closed_list:
-                    heapq.heappush(open_list, new_node)
+                    heapq.heappush(open_list, (new_node, counter))
+                    counter += 1
 
     # no path found
-    print("st_astar: No path found", start, goal)
+    # print("st_astar: No path found", start, goal)
     return None

@@ -10,6 +10,8 @@ import matplotlib.animation as animation
 
 import copy
 
+from st_astar import space_time_astar
+
 
 # %%
 # TOPOLOGICAL SORT
@@ -387,7 +389,8 @@ def step(env, logger, throughput, q_vals, policy="random"):
         logger.print(f"Priorities not feasible after {MAX_TRIES} tries")
         # try using PBS
         logger.print(f"running PBS...")
-        result = priority_based_search(env.grid_map, env.starts, env.goals)
+        logger.print(env.starts, env.goals)
+        result = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size)
         if result == "No Solution":
             logger.print("No solution found using PBS, skipping instance\n")
             env.reset()
@@ -396,13 +399,16 @@ def step(env, logger, throughput, q_vals, policy="random"):
 
         else:
             plan, priority_order = result
+
+            paths = plan.values()
+            for i, path in enumerate(paths):
+                print(f"Agent {i}: {path}")
+
             graph = defaultdict(list)
             for agent in range(env.num_agents):
                 graph[agent] = []
             for a, b in priority_order:
                 graph[a].append(b)
-                # if b not in graph:
-                #     graph[b] = []
             priorities = topological_sort_pbs(graph)
 
             print(priorities)
@@ -436,21 +442,22 @@ class Node:
         self.priority_order = set()  # Partial order of agent priorities
         self.cost = float('inf')  # Cost of the plan
 
-def low_level_search(start, goals, grid, constraints, agent_id, max_time=100):
+def low_level_search(start, goals, grid, constraints, agent_id, window_size, max_time=100):
     """A* search for a single agent that respects constraints."""
     def heuristic(pos, goal):
         return abs(pos[0] - goal[0]) + abs(pos[1] - goal[1])
 
     def get_neighbors(pos):
         x, y = pos
-        neighbors = [(x, y)]
+        neighbors = [(x, y)] # wait action
         for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < len(grid) and 0 <= ny < len(grid[0]) and grid[nx][ny] == 0:
                 neighbors.append((nx, ny))
         return neighbors
 
-    goals = copy.deepcopy(goals)
+    # just look for path to the first 5 goals
+    goals = goals[:window_size].copy()
     goal = goals.pop(0)
 
     open_set = []
@@ -469,8 +476,9 @@ def low_level_search(start, goals, grid, constraints, agent_id, max_time=100):
             if goals:
                 goal = goals.pop(0)
                 open_set = []
-                heapq.heappush(open_set, (heuristic(current, goal), 0, current, []))
+                heapq.heappush(open_set, (heuristic(current, goal), g, current, path))
                 visited = set()
+                _, g, current, path = heapq.heappop(open_set)
 
             else:
                 return path + [current]
@@ -504,13 +512,15 @@ def low_level_search(start, goals, grid, constraints, agent_id, max_time=100):
 
     return None  # No path found
 
-def detect_collision(plan):
+def detect_collision(plan, window_size):
     """Detect the first vertex or edge collision in the plan."""
     time_dict = defaultdict(list)
     edge_dict = defaultdict(list)
 
     for agent, path in plan.items():
         for t, pos in enumerate(path):
+            if t > window_size:
+                break
             time_dict[(pos, t)].append(agent)
 
             agents = time_dict[(pos, t)]
@@ -540,7 +550,37 @@ def detect_collision(plan):
 
     return None  # No collisions detected
 
-def update_plan(node, agent_id, grid, starts, goals):
+def get_sub_order(agent, priority_order, lower=True):
+    """
+    Given an agent and a set of pairwise constraints (priority_order),
+    return the set S = {agent} ∪ {j | agent ≺_N j} (transitively).
+    
+    Args:
+        agent: The starting agent (e.g., an integer or identifier).
+        priority_order: A set of tuples (a, b) meaning agent a has higher priority than agent b.
+        
+    Returns:
+        A set of agents that includes the starting agent and all agents that come
+        after it in the priority ordering.
+    """
+    S = set()
+    stack = [agent]
+    while stack:
+        current = stack.pop()
+        # Find all agents j such that there is a constraint (current, j)
+        for (a, b) in priority_order:
+            if lower:
+                if a == current and b not in S:
+                    S.add(b)
+                    stack.append(b)
+            else:
+                if b == current and a not in S:
+                    S.add(a)
+                    stack.append(a)
+    return S
+
+
+def update_plan(node, agent_id, grid, starts, goals, window_size):
     """Update the plan for an agent considering the current priority order."""
     # Topological sorting of priorities
     graph = defaultdict(list)
@@ -552,36 +592,75 @@ def update_plan(node, agent_id, grid, starts, goals):
         if b not in graph:
             graph[b] = []
 
+    # LIST ← topological sorting on partially ordered set ({i} ∪ {j|i ≺N j}, ≺≺≺N )
+    higher_than_agent = get_sub_order(agent_id, node.priority_order, lower=False)
+    lower_than_agent = get_sub_order(agent_id, node.priority_order, lower=True)
+
     try:
         sorted_agents = topological_sort_pbs(graph)
     except ValueError:
         return False  # Cyclic dependency in priorities
     
     constraints = []  # Constraints are derived from priorities
-    higher_priority_agents = sorted_agents[:sorted_agents.index(agent_id)]
-    for higher_agent in higher_priority_agents:
+
+    dynamic_constraints = dict()
+    edge_constraints = dict()
+    
+    for higher_agent in higher_than_agent:
         higher_agent_path = node.plan[higher_agent]
         for t, pos in enumerate(higher_agent_path):
-            constraints.append({'type': 'vertex', 'agent': higher_agent, 'pos': pos, 'time': t})
-            if t < len(higher_agent_path) - 1:
-                edge = (higher_agent_path[t], higher_agent_path[t + 1])
-                constraints.append({'type': 'edge', 'agent': higher_agent, 'edge': edge, 'time': t + 1})
+            if t > window_size:
+                break
+
+            # constraints.append({'type': 'vertex', 'agent': higher_agent, 'pos': pos, 'time': t})
+            # if t < len(higher_agent_path) - 1:
+            #     edge = (higher_agent_path[t], higher_agent_path[t + 1])
+            #     constraints.append({'type': 'edge', 'agent': higher_agent, 'edge': edge, 'time': t + 1})
+
+            y, x = pos
+            y_2, x_2 = higher_agent_path[t+1]
+            dynamic_constraints[(y, x, t)] = higher_agent
+            # add edge constraints (only add the first window elements)
+            edge = ((y, x, t), (y_2, x_2, t+1))
+            edge_constraints[edge] = higher_agent
     
     lower_priority_agents = sorted_agents[sorted_agents.index(agent_id):]
+
     for agent in lower_priority_agents:
-        # Perform low-level search for the current agent
-        path = low_level_search(starts[agent], goals[agent], grid, constraints, agent)
-        if path is None:
-            return False  # No solution found for the current agent
-        node.plan[agent] = path
-    
-        for time, pos in enumerate(node.plan[agent]):
-            # Add a vertex constraint
-            constraints.append({'type': 'vertex', 'agent': agent, 'pos': pos, 'time': time})
-            # Add an edge constraint (to prevent moving into `a`'s next position)
-            if time < len(node.plan[agent]) - 1:
-                edge = (node.plan[agent][time], node.plan[agent][time + 1])
-                constraints.append({'type': 'edge', 'agent': agent, 'edge': edge, 'time': time + 1})
+        if agent == agent_id or agent in lower_than_agent:
+            # Perform low-level search for the current agent
+            # path = f(starts[agent], goals[agent], grid, constraints, agent, window_size)
+
+            path = space_time_astar(np.array(grid), starts[agent], goals[agent][:window_size], dynamic_constraints, edge_constraints)
+
+            if path is None:
+                return False  # No solution found for the current agent
+            
+            mod_path = [(x, y) for (x, y, t) in path]
+
+            node.plan[agent] = mod_path
+        
+            # for time, pos in enumerate(node.plan[agent]):
+            #     if time > window_size:
+            #         break
+            #     # Add a vertex constraint
+            #     constraints.append({'type': 'vertex', 'agent': agent, 'pos': pos, 'time': time})
+            #     # Add an edge constraint (to prevent moving into `a`'s next position)
+            #     if time < len(node.plan[agent]) - 1:
+            #         edge = (node.plan[agent][time], node.plan[agent][time + 1])
+            #         constraints.append({'type': 'edge', 'agent': agent, 'edge': edge, 'time': time + 1})
+
+
+            for y, x, t in path:
+                if t > window_size:
+                    break
+                dynamic_constraints[(y, x, t)] = agent
+            # add edge constraints (only add the first window elements)
+            for t, pos in enumerate(path):
+                if t > window_size:
+                    break
+                edge = ((path[t][0], path[t][1], path[t][2]), (path[t+1][0], path[t+1][1], path[t+1][2]))
+                edge_constraints[edge] = agent
 
     return True
 
@@ -609,14 +688,19 @@ def topological_sort_pbs(graph):
         raise ValueError("Graph has a cycle and cannot be topologically sorted.")
 
 
-def priority_based_search(grid, starts, goals, max_iter=10000):
+def priority_based_search(grid, starts, goals, window_size, max_iter=10000):
     """Main PBS algorithm."""
     root = Node()
     for agent, start in enumerate(starts):
         # path to next goal
-        path = low_level_search(start, goals[agent], grid, [], agent)
+        # path = low_level_search(start, goals[agent], grid, [], agent, window_size)
+        path = space_time_astar(np.array(grid), start, goals[agent][:window_size], dict(), dict())
+
         if path is None:
             return "No Solution"
+        
+        path = [(x, y) for (x, y, t) in path]
+
         root.plan[agent] = path
 
     root.cost = sum(len(path) for path in root.plan.values())
@@ -630,7 +714,7 @@ def priority_based_search(grid, starts, goals, max_iter=10000):
         iteration += 1
         
         node = stack.pop()
-        collision = detect_collision(node.plan)
+        collision = detect_collision(node.plan, window_size)
 
         if not collision:
             return (node.plan, node.priority_order)
@@ -643,7 +727,7 @@ def priority_based_search(grid, starts, goals, max_iter=10000):
             new_node.priority_order = set(node.priority_order)
             new_node.priority_order.add((aj, ai) if agent == ai else (ai, aj))
 
-            success = update_plan(new_node, agent, grid, starts, goals)
+            success = update_plan(new_node, agent, grid, starts, goals, window_size)
             if success:
                 new_node.cost = sum(len(path) for path in new_node.plan.values())
                 new_nodes.append(new_node)

@@ -112,7 +112,7 @@ test:
 
   environment:
     SIZE: 14
-    NUM_AGENTS: 35
+    NUM_AGENTS: 36
     OBSTACLE_DENSITY: 0.5
     FOV: 7
     WINDOW_SIZE: 3
