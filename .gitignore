@@ -4,5 +4,7 @@
 
 
 *.txt
-*png
-*pth
+*.png
+*.pth
+*.npy
+*.pkl

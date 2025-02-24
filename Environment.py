@@ -4,6 +4,7 @@ from st_astar import space_time_astar
 import numpy as np
 import os
 from collections import defaultdict
+import pickle
 
 from utils import *
 
@@ -11,7 +12,7 @@ from utils import *
 np.random.seed(0)
 
 class Environment:
-    def __init__(self, config, logger=None, grid_map_file=None, starts=None, goals=None, heuristic_map_file=None, start_loc_options=None, goal_loc_options=None):
+    def __init__(self, config, logger=None, grid_map_file=None, start_loc_file=None, goal_loc_file=None, heuristic_map_file=None, start_loc_options=None, goal_loc_options=None):
 
         root = os.path.dirname(__file__) + '/'
 
@@ -57,9 +58,9 @@ class Environment:
         self.optimal_goal_reached = 0
 
 
-        self._old_goals = []
-        self._old_starts = []
-        self._old_heur_fovs = []
+        # self._old_goals = []
+        # self._old_starts = []
+        # self._old_heur_fovs = []
 
         if start_loc_options:
             self.start_loc_options = np.load(root+start_loc_options)
@@ -78,14 +79,21 @@ class Environment:
                     if self.grid_map[y, x] == 0:
                         self.goal_loc_options.append((y, x))
 
-        if starts is not None:
-            self.starts = starts.copy()
+        if start_loc_file is not None:
+            # self.starts = [tuple(x) for x in np.load(start_loc_file)]
+            with open(start_loc_file, "rb") as f:
+                self.starts = pickle.load(f)
+
         else:
             self.starts = self._get_start_locs()
         self.optimal_starts = self.starts.copy()
 
-        if goals is not None:
-            self.goals = goals.copy()
+        if goal_loc_file is not None:
+            # self.goals = []
+            # for i in np.load(goal_loc_file):
+            #     self.goals.append([tuple(j) for j in i])
+            with open(goal_loc_file, "rb") as f:
+                self.goals = pickle.load(f)
         else:
             self.goals = self._get_goals_locs()
 
@@ -98,11 +106,12 @@ class Environment:
             np.save(root+heuristic_map_file, self.heuristic_map)
 
         # old heuristic map
-        for agent in range(self.num_agents):
-            heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
-            heur /= np.max(heur[heur < np.inf])
-            self._old_heur_fovs.append(heur)
+        # for agent in range(self.num_agents):
+        #     heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
+        #     heur /= np.max(heur[heur < np.inf])
+        #     self._old_heur_fovs.append(heur)
 
+        # FOR WHEN USING TRAINED MODEL
         self.DHC_heur = self._get_DHC_heur()
 
     def _get_start_locs(self):
@@ -148,6 +157,30 @@ class Environment:
                         heuristic_map[(y, x)][y2, x2] = len(space_time_astar(self.grid_map, (y, x), [(y2, x2)], set(), set())) - 1
         return heuristic_map
 
+    def _get_DHC_heur_to_goal(self, goal):
+        heur = np.zeros((4, *self.grid_map.shape))
+        heur_map = self.heuristic_map[goal]
+        for y in range(self.grid_map.shape[0]):
+            for x in range(self.grid_map.shape[1]):
+                if self.grid_map[y, x] == 0:
+                    # up
+                    if y > 0 and heur_map[y-1, x] < heur_map[y, x]:
+                        assert heur_map[y-1, x] == heur_map[y, x]-1
+                        heur[0, y, x] = 1
+                    # down
+                    if y < self.grid_map.shape[0]-1 and heur_map[y+1, x] < heur_map[y, x]:
+                        assert heur_map[y+1, x] == heur_map[y, x]-1
+                        heur[1, y, x] = 1
+                    # left
+                    if x > 0 and heur_map[y, x-1] < heur_map[y, x]:
+                        assert heur_map[y, x-1] == heur_map[y, x]-1
+                        heur[2, y, x] = 1
+                    # right
+                    if x < self.grid_map.shape[0]-1 and heur_map[y, x+1] < heur_map[y, x]:
+                        assert heur_map[y, x+1] == heur_map[y, x]-1
+                        heur[3, y, x] = 1
+        return heur
+
     def _get_DHC_heur(self):
         # DHC HEURISTIC MAP
         DHC_heur = []
@@ -155,26 +188,7 @@ class Environment:
             # number of goals, 4 directions, map size
             heur = np.zeros((len(self.goals[agent]), 4, *self.grid_map.shape))
             for i, goal in enumerate(self.goals[agent]):
-                heur_map = self.heuristic_map[goal]
-                for y in range(self.grid_map.shape[0]):
-                    for x in range(self.grid_map.shape[1]):
-                        if self.grid_map[y, x] == 0:
-                            # up
-                            if y > 0 and heur_map[y-1, x] < heur_map[y, x]:
-                                assert heur_map[y-1, x] == heur_map[y, x]-1
-                                heur[i, 0, y, x] = 1
-                            # down
-                            if y < self.grid_map.shape[0]-1 and heur_map[y+1, x] < heur_map[y, x]:
-                                assert heur_map[y+1, x] == heur_map[y, x]-1
-                                heur[i, 1, y, x] = 1
-                            # left
-                            if x > 0 and heur_map[y, x-1] < heur_map[y, x]:
-                                assert heur_map[y, x-1] == heur_map[y, x]-1
-                                heur[i, 2, y, x] = 1
-                            # right
-                            if x < self.grid_map.shape[0]-1 and heur_map[y, x+1] < heur_map[y, x]:
-                                assert heur_map[y, x+1] == heur_map[y, x]-1
-                                heur[i, 3, y, x] = 1
+                heur[i] = self._get_DHC_heur_to_goal(goal)
             DHC_heur.append(heur)
         return DHC_heur
 
@@ -195,9 +209,9 @@ class Environment:
         self.goal_reached = 0
         self.optimal_goal_reached = 0
 
-        self._old_goals = []
-        self._old_starts = []
-        self._old_heur_fovs = []
+        # self._old_goals = []
+        # self._old_starts = []
+        # self._old_heur_fovs = []
 
         # generate random starts and goals on empty cells
         self.starts = self._get_start_locs()
@@ -209,10 +223,10 @@ class Environment:
 
 
         # old heuristic map
-        for agent in range(self.num_agents):
-            heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
-            heur /= np.max(heur[heur < np.inf])
-            self._old_heur_fovs.append(heur)
+        # for agent in range(self.num_agents):
+        #     heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
+        #     heur /= np.max(heur[heur < np.inf])
+        #     self._old_heur_fovs.append(heur)
 
     def step(self, priorities):
         self.goal_reached = 0
@@ -228,8 +242,8 @@ class Environment:
         self.actual_path_lengths = {}
         self.optimal_path_lengths = {}
 
-        self._old_goals = self.goals.copy()
-        self._old_starts = self.starts.copy()
+        # self._old_goals = self.goals.copy()
+        # self._old_starts = self.starts.copy()
 
         temp_paths = []
         temp_opt_paths = []
@@ -241,7 +255,7 @@ class Environment:
             goals_to_plan = self.goals[agent][:self.window_size]
             path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
 
-            print(f"Agent {agent}:", path)
+            # print(f"Agent {agent}:", path)
 
             if path is None:
                 return None, None
@@ -303,6 +317,9 @@ class Environment:
 
             # remove goals that are reached
             self.goals[agent] = self.goals[agent][goal_idx:]
+            
+            # remove DHC heurs of goals that are reached
+            self.DHC_heur[agent] = self.DHC_heur[agent][goal_idx:]
 
             # # if last goal is self.window_size away, add a new goal
             # while len(self.goals[agent]) == 0 or np.abs(self.goals[agent][-1][0] - self.starts[agent][0]) + np.abs(
@@ -319,6 +336,9 @@ class Environment:
                 new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
                 self.goals[agent] += new_goal
 
+                new_DHC_heur = self._get_DHC_heur_to_goal(new_goal[0])
+                self.DHC_heur[agent] = np.concatenate([self.DHC_heur[agent], np.expand_dims(new_DHC_heur, axis=0)], axis=0)
+
             # WRONG: if i keep adding goals on each env.step(), goal list will keep increasing and ST A* will take longer to compute
             # # add extra just in case
             # new_goal = (np.random.randint(1, self.size),
@@ -329,6 +349,8 @@ class Environment:
             # self.goals[agent].append(new_goal)
 
             self.paths[agent] = path[:self.window_size+1]
+
+            assert len(self.goals[agent]) == self.DHC_heur[agent].shape[0]
 
         # update the heuristic map
         # self.DHC_heur = self._get_DHC_heur()
@@ -405,7 +427,7 @@ class Environment:
             obs[agent, 6] = self._get_fov(self.DHC_heur[agent][0][3], x, y, self.fov)
 
 
-        self._old_heur_fovs = [obs[i, 2] for i in range(self.num_agents)]
+        # self._old_heur_fovs = [obs[i, 2] for i in range(self.num_agents)]
 
         obs_fovs = torch.tensor(obs)
         obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)

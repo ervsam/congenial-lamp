@@ -389,6 +389,11 @@ clean up
 1. use PBS for hard instances
 - fixed, plan conflict free only for window_size time step
 
+## 22 FEB 2025
+1. train again, with corrected PBS and DHC heur layer, use curriculum learning
+. on warehouse_1 map (4 rows, 2 col), train-warehouse_1
+
+
 
 
 # meet updates

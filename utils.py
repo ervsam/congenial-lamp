@@ -416,7 +416,12 @@ def step(env, logger, throughput, q_vals, policy="random"):
             new_start, new_goals = env.step(priorities)
             logger.print("Time to env.step:", time.time()-start_time)
 
-            assert new_start is not None
+            # assert new_start is not None
+            if new_start is None:
+                logger.print("PBS and PP does not match, skipping instance\n")
+                env.reset()
+                new_start, new_goals = env.starts, env.goals
+                return None, None, None, None, None, throughput
 
             partial_prio = dict()
             pred_value = dict()

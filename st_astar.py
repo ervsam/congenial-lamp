@@ -27,9 +27,6 @@ def is_valid(old_x, old_y, x, y, t, grid, dynamic_constraints, edge_constraints)
     if grid[x, y] == 1:
         return False
     if (x, y, t) in dynamic_constraints:
-        if dynamic_constraints[(x, y, t)] == 0:
-            print("st_astar: dynamic constraint violated", x, y, t)
-
         return False
     # edge constraints
     if ((x, y, t-1), (old_x, old_y, t)) in edge_constraints:

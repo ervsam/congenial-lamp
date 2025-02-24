@@ -47,6 +47,11 @@ class Encoder(nn.Module):
             nn.LeakyReLU(True),
             ResBlock(32),
             ResBlock(32),
+
+            # extra
+            # ResBlock(32),
+            # ResBlock(32),
+            
             nn.Conv2d(32, 16, 1, 1),
             nn.LeakyReLU(True),
             nn.Flatten(),
