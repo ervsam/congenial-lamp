@@ -8,7 +8,6 @@ import pickle
 
 from utils import *
 
-# set np seed
 np.random.seed(0)
 
 class Environment:
@@ -57,11 +56,6 @@ class Environment:
         self.goal_reached = 0
         self.optimal_goal_reached = 0
 
-
-        # self._old_goals = []
-        # self._old_starts = []
-        # self._old_heur_fovs = []
-
         if start_loc_options:
             self.start_loc_options = np.load(root+start_loc_options)
         else:
@@ -89,9 +83,6 @@ class Environment:
         self.optimal_starts = self.starts.copy()
 
         if goal_loc_file is not None:
-            # self.goals = []
-            # for i in np.load(goal_loc_file):
-            #     self.goals.append([tuple(j) for j in i])
             with open(goal_loc_file, "rb") as f:
                 self.goals = pickle.load(f)
         else:
@@ -104,12 +95,6 @@ class Environment:
         else:
             self.heuristic_map = self._get_heuristic_map()
             np.save(root+heuristic_map_file, self.heuristic_map)
-
-        # old heuristic map
-        # for agent in range(self.num_agents):
-        #     heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
-        #     heur /= np.max(heur[heur < np.inf])
-        #     self._old_heur_fovs.append(heur)
 
         # FOR WHEN USING TRAINED MODEL
         self.DHC_heur = self._get_DHC_heur()
@@ -209,10 +194,6 @@ class Environment:
         self.goal_reached = 0
         self.optimal_goal_reached = 0
 
-        # self._old_goals = []
-        # self._old_starts = []
-        # self._old_heur_fovs = []
-
         # generate random starts and goals on empty cells
         self.starts = self._get_start_locs()
         self.optimal_starts = self.starts.copy()
@@ -221,12 +202,6 @@ class Environment:
 
         self.DHC_heur = self._get_DHC_heur()
 
-
-        # old heuristic map
-        # for agent in range(self.num_agents):
-        #     heur = self._get_fov(self.heuristic_map[self.goals[agent][0]], self.starts[agent][0], self.starts[agent][1], self.fov)
-        #     heur /= np.max(heur[heur < np.inf])
-        #     self._old_heur_fovs.append(heur)
 
     def step(self, priorities):
         self.goal_reached = 0
@@ -242,16 +217,12 @@ class Environment:
         self.actual_path_lengths = {}
         self.optimal_path_lengths = {}
 
-        # self._old_goals = self.goals.copy()
-        # self._old_starts = self.starts.copy()
-
         temp_paths = []
         temp_opt_paths = []
 
         for agent in priorities:
             assert len(priorities) == self.num_agents, "Environment.step(): priorities length is not equal to number of agents"
             
-            # TODO: update ST A* to handle multiple goals
             goals_to_plan = self.goals[agent][:self.window_size]
             path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
 
@@ -321,16 +292,6 @@ class Environment:
             # remove DHC heurs of goals that are reached
             self.DHC_heur[agent] = self.DHC_heur[agent][goal_idx:]
 
-            # # if last goal is self.window_size away, add a new goal
-            # while len(self.goals[agent]) == 0 or np.abs(self.goals[agent][-1][0] - self.starts[agent][0]) + np.abs(
-            #         self.goals[agent][-1][1] - self.starts[agent][1]) < self.window_size:
-            #     new_goal = (np.random.randint(1, self.size),
-            #                 np.random.randint(1, self.size))
-            #     while self.grid_map[new_goal[0], new_goal[1]] == 1:
-            #         new_goal = (np.random.randint(1, self.size),
-            #                     np.random.randint(1, self.size))
-            #     self.goals[agent].append(new_goal)
-            # OR while len(goal) is less than window_size
             while len(self.goals[agent]) <= self.window_size:
                 idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
                 new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
@@ -339,21 +300,9 @@ class Environment:
                 new_DHC_heur = self._get_DHC_heur_to_goal(new_goal[0])
                 self.DHC_heur[agent] = np.concatenate([self.DHC_heur[agent], np.expand_dims(new_DHC_heur, axis=0)], axis=0)
 
-            # WRONG: if i keep adding goals on each env.step(), goal list will keep increasing and ST A* will take longer to compute
-            # # add extra just in case
-            # new_goal = (np.random.randint(1, self.size),
-            #             np.random.randint(1, self.size))
-            # while self.grid_map[new_goal[0], new_goal[1]] == 1:
-            #     new_goal = (np.random.randint(1, self.size),
-            #                 np.random.randint(1, self.size))
-            # self.goals[agent].append(new_goal)
-
             self.paths[agent] = path[:self.window_size+1]
 
             assert len(self.goals[agent]) == self.DHC_heur[agent].shape[0]
-
-        # update the heuristic map
-        # self.DHC_heur = self._get_DHC_heur()
 
         return self.starts, self.goals
 
@@ -426,9 +375,6 @@ class Environment:
             obs[agent, 5] = self._get_fov(self.DHC_heur[agent][0][2], x, y, self.fov)
             obs[agent, 6] = self._get_fov(self.DHC_heur[agent][0][3], x, y, self.fov)
 
-
-        # self._old_heur_fovs = [obs[i, 2] for i in range(self.num_agents)]
-
         obs_fovs = torch.tensor(obs)
         obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)
         return obs_fovs
@@ -458,43 +404,6 @@ class Environment:
         updated_delays = []
         for agent in range(self.num_agents):
             updated_delays.append(len(self.actual_path_lengths[agent]) - len(self.optimal_path_lengths[agent]))
-
-        # WRONG (and complicated) CALCULATION OF DELAYS
-        # # if no goal reached by optimal path
-        # # delay = dist(current, optimal)
-        # # for goal reached by optimal path, but not reached by true path
-        # # delay = dist(current, G1) + dist(G1, G2) + ... + dist(Gn, optimal)
-        # # where Gx is goals unreached by true path
-        # delays = []
-        # for (n_goals_reached, n_optimal_goals_reached, goals, loc, opt_loc) in zip(self.goal_reached_per_agent, self.optimal_goal_reached_per_agent, self._old_goals, self.starts, self.optimal_starts):
-        #     if n_optimal_goals_reached - n_goals_reached > 0:
-        #         # curr to goal unreached by true path
-        #         delay = self.heuristic_map[goals[n_goals_reached]
-        #                                    ][loc[0], loc[1]]
-
-        #         # goal unreached by true path to goal reached by optimal path
-        #         for i in range(0, n_optimal_goals_reached-1):
-        #             delay += self.heuristic_map[goals[n_goals_reached+i]
-        #                                         ][goals[n_goals_reached+i+1][0], goals[n_goals_reached+i+1][1]]
-
-        #         delay += self.heuristic_map[goals[n_optimal_goals_reached-1]
-        #                                     ][opt_loc[0], opt_loc[1]]
-        #     else:
-        #         delay = self.heuristic_map[goals[n_goals_reached]][loc[0], loc[1]] - \
-        #             self.heuristic_map[goals[n_goals_reached]
-        #                                ][opt_loc[0], opt_loc[1]]
-        #     delays.append(delay)
-        #     # heur of heur(current position) - heur(optimal position)
-        #     # delays.append(
-        #     #     self.heuristic_map[goals[0]][loc[0], loc[1]] -
-        #     #     self.heuristic_map[goals[0]][opt_loc[0], opt_loc[1]])
-
-        # if (delays != updated_delays):
-        #     self.logger.print("Environment.get_delays(): delays and updated_delays are not the same", delays, updated_delays)
-
-        #     for agent, delay in enumerate(delays):
-        #         if len(self.actual_path_lengths[agent]) - len(self.optimal_path_lengths[agent]) != delay:
-        #             self.logger.print("agent:", agent, "\nactual:", self.actual_path_lengths[agent], "\noptimal", self.optimal_path_lengths[agent])
 
         return updated_delays
 
