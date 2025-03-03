@@ -142,6 +142,9 @@ generate_results:
     warehouse_1: "maps/warehouse_1/"
     warehouse_2: "maps/warehouse_2/"
     random_1: "maps/random_1/"
+    random_20: "maps/random_20/"
+    random_40: "maps/random_40/"
+    random_60: "maps/random_60/"
 
   map_file: "grid_map.npy"
   heur_file: "heuristic.npy"

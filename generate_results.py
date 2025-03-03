@@ -56,37 +56,8 @@ file_path = "config.yaml"
 with open(file_path, "r") as file:
     config_file = yaml.safe_load(file)
 
-algorithm = "PBS"
-grid_map = "warehouse_2"
-
 # %%
-# CONFIGS
-config = config_file["generate_results"]
-DIR = config["root"] + config["subroot"]
-map_path = config["maps"][grid_map]
-env_config = config["environment"]
-dir_results = DIR + algorithm + "/" + grid_map + "/"
-if not os.path.exists(dir_results):
-    os.makedirs(dir_results)
-
-# map
-GRID_MAP_FILE = map_path + config["map_file"]
-HEURISTIC_MAP_FILE = map_path + config["heur_file"]
-START_OPTIONS = map_path + config["start_options"]
-GOAL_OPTIONS = map_path + config["goal_options"]
-
-log_path = dir_results + "log/"
-if not os.path.exists(log_path):
-    os.makedirs(log_path)
-
-logger = Logger(log_path+"log.txt")
-
-TIMEOUT = 60
-TIMESTEP = 5000
-
-
-# %%
-def simulate(env, logger, algorithm="random_PP", q_net=None):
+def simulate(env, logger, algorithm, q_net=None):
     logger.reset()
     goals_reached = []
     runtimes = []
@@ -110,19 +81,22 @@ def simulate(env, logger, algorithm="random_PP", q_net=None):
                     solved = True
                     break
         elif algorithm == "PBS":
-            paths, priority_order = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size)
-            paths = paths.values()
+            result = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size, max_time=TIMEOUT)
 
-            
+            if result == "No Solution":
+                break
+            else:
+                paths, priority_order = result
+                paths = paths.values()
 
-            pass
+                new_start, new_goals = env.step_PBS(paths)
+                solved = True
 
         elif algorithm == "QTRAN":
             obs_fovs = env.get_obs()
             pair_enc, q_vals = q_net(obs_fovs.unsqueeze(0), [close_pairs])
             # sample priorities
             priorities, partial_prio, pred_value = sample_priorities(env, logger, close_pairs, q_vals[0], policy='greedy')
-            new_start = None
             if priorities:
                 new_start, new_goals = env.step(priorities)
                 if new_start is not None:
@@ -144,50 +118,76 @@ def simulate(env, logger, algorithm="random_PP", q_net=None):
             runtimes.append(time.time()-start_time)
             goals_reached.append(env.goal_reached)
             
-            logger.print("Priority ordering:", priorities)
+            if algorithm != "PBS":
+                logger.print("Priority ordering:", priorities)
             logger.print("Time to solve instance:", round(time.time()-start_time, 3), "\n")
 
     return goals_reached, runtimes
 
-# %% [markdown]
-# ### Load model
-
 # %%
-q_net = QNetwork()
-q_net.load_state_dict(torch.load('./results/warehouse/q_net_model/q_net_1420000.pth'))
-# q_net.eval()
-# q_net.train()
 
-# %% [markdown]
-# ### Create environment
+TIMEOUT = 60
+TIMESTEP = 5000
+num_of_agents = [10, 20, 30, 40, 50]
 
-# %%
-# for different number of agents
-# simulate for 5000 steps on given start and goal locations
+grid_map_list = ["random_20", "random_40", "random_60"]
+algorithm_list = ["random_PP", "PBS", "QTRAN"]
+# algorithm = "PBS"
+# grid_map = "warehouse_2"
 
-num_of_agents = list(range(50, 101, 10))
-# [10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38]
+for grid_map in grid_map_list:
+    for algorithm in algorithm_list:
+        # CONFIGS
+        config = config_file["generate_results"]
+        DIR = config["root"] + config["subroot"]
+        map_path = config["maps"][grid_map]
+        env_config = config["environment"]
+        dir_results = DIR + algorithm + "/" + grid_map + "/"
+        if not os.path.exists(dir_results):
+            os.makedirs(dir_results)
 
-results = {}
+        # map
+        GRID_MAP_FILE = map_path + config["map_file"]
+        HEURISTIC_MAP_FILE = map_path + config["heur_file"]
+        START_OPTIONS = map_path + config["start_options"]
+        GOAL_OPTIONS = map_path + config["goal_options"]
 
-logger.print("simulating for", num_of_agents, "using", algorithm, "on", grid_map, "\n")
+        log_path = dir_results + "log/"
+        if not os.path.exists(log_path):
+            os.makedirs(log_path)
 
-for num_agents in num_of_agents:
-    results[num_agents] = {}
-    START_LOCS = map_path + config["start_locs"] + f"{num_agents}N.pkl"
-    GOAL_LOCS = map_path + config["goal_locs"] + f"{num_agents}N.pkl"
+        logger = Logger(log_path+"log.txt")
 
-    env_config['NUM_AGENTS'] = num_agents
+        # ### Load model
+        q_net = None
+        if algorithm == "QTRAN":
+            q_net = QNetwork()
+            q_net.load_state_dict(torch.load('./results/warehouse/q_net_model/q_net_1420000.pth'))
+            # q_net.eval()
+            # q_net.train()
 
-    env = Environment(env_config, logger=logger, grid_map_file=GRID_MAP_FILE, start_loc_options=START_OPTIONS,
-                  goal_loc_options=GOAL_OPTIONS, heuristic_map_file=HEURISTIC_MAP_FILE, start_loc_file=START_LOCS, goal_loc_file=GOAL_LOCS)
+        # ### Create environment
+        # for different number of agents
+        # simulate for 5000 steps on given start and goal locations
 
-    num_goals_reached, runtimes = simulate(env, logger, algorithm, q_net)
-    results[num_agents]['num_goals_reached'] = num_goals_reached
-    results[num_agents]['runtimes'] = runtimes
+        logger.print("simulating for", num_of_agents, "using", algorithm, "on", grid_map, "\n")
 
-    # append to results file
-    with open(dir_results+"results.pkl", "wb") as f:
-        pickle.dump(results, f)
+        results = {}
+        for num_agents in num_of_agents:
+            results[num_agents] = {}
+            START_LOCS = map_path + config["start_locs"] + f"{num_agents}N.pkl"
+            GOAL_LOCS = map_path + config["goal_locs"] + f"{num_agents}N.pkl"
 
+            env_config['NUM_AGENTS'] = num_agents
+
+            env = Environment(env_config, logger=logger, grid_map_file=GRID_MAP_FILE, start_loc_options=START_OPTIONS,
+                        goal_loc_options=GOAL_OPTIONS, heuristic_map_file=HEURISTIC_MAP_FILE, start_loc_file=START_LOCS, goal_loc_file=GOAL_LOCS)
+
+            num_goals_reached, runtimes = simulate(env, logger, algorithm, q_net)
+            results[num_agents]['num_goals_reached'] = num_goals_reached
+            results[num_agents]['runtimes'] = runtimes
+
+            # append to results file
+            with open(dir_results+"results.pkl", "wb") as f:
+                pickle.dump(results, f)
 

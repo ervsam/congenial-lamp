@@ -526,13 +526,14 @@ def detect_collision(plan, window_size):
         for t, pos in enumerate(path):
             if t > window_size:
                 break
+            
             time_dict[(pos, t)].append(agent)
 
             agents = time_dict[(pos, t)]
             if len(agents) > 1:
                 return {'type': 'vertex', 'time': t, 'pos': pos, 'agents': agents}
             
-            if t < len(path) - 1:
+            if t < window_size:
                 edge = (path[t], path[t + 1])
                 if edge[0] != edge[1]:
                     edge_dict[(edge, t + 1)].append(agent)
@@ -542,16 +543,6 @@ def detect_collision(plan, window_size):
                     if reverse_edge in edge_dict.keys():
                         agents += edge_dict[reverse_edge]
                         return {'type': 'edge', 'time': t, 'edge': edge, 'agents': agents}
-
-    # for (pos, t), agents in time_dict.items():
-    #     if len(agents) > 1:
-    #         return {'type': 'vertex', 'time': t, 'pos': pos, 'agents': agents}
-        
-    # for (edge, t), agents in edge_dict.items():
-    #     reverse_edge = ((edge[1], edge[0]), t)
-    #     if reverse_edge in edge_dict.keys():
-    #         agents += edge_dict[reverse_edge]
-    #         return {'type': 'edge', 'time': t, 'edge': edge, 'agents': agents}
 
     return None  # No collisions detected
 
@@ -584,13 +575,10 @@ def get_sub_order(agent, priority_order, lower=True):
                     stack.append(a)
     return S
 
-
 def update_plan(node, agent_id, grid, starts, goals, window_size):
     """Update the plan for an agent considering the current priority order."""
     # Topological sorting of priorities
     graph = defaultdict(list)
-    # for agent in range(len(starts)):
-    #     graph[agent] = []
 
     for a, b in node.priority_order:
         graph[a].append(b)
@@ -606,66 +594,47 @@ def update_plan(node, agent_id, grid, starts, goals, window_size):
     except ValueError:
         return False  # Cyclic dependency in priorities
     
-    constraints = []  # Constraints are derived from priorities
-
     dynamic_constraints = dict()
     edge_constraints = dict()
-    
+
     for higher_agent in higher_than_agent:
         higher_agent_path = node.plan[higher_agent]
+
         for t, pos in enumerate(higher_agent_path):
             if t > window_size:
                 break
 
-            # constraints.append({'type': 'vertex', 'agent': higher_agent, 'pos': pos, 'time': t})
-            # if t < len(higher_agent_path) - 1:
-            #     edge = (higher_agent_path[t], higher_agent_path[t + 1])
-            #     constraints.append({'type': 'edge', 'agent': higher_agent, 'edge': edge, 'time': t + 1})
-
             y, x = pos
-            y_2, x_2 = higher_agent_path[t+1]
             dynamic_constraints[(y, x, t)] = higher_agent
             # add edge constraints (only add the first window elements)
-            edge = ((y, x, t), (y_2, x_2, t+1))
-            edge_constraints[edge] = higher_agent
+            if t < window_size:
+                y_2, x_2 = higher_agent_path[t+1]
+                edge = ((y, x, t), (y_2, x_2, t+1))
+                edge_constraints[edge] = higher_agent
     
     lower_priority_agents = sorted_agents[sorted_agents.index(agent_id):]
 
     for agent in lower_priority_agents:
         if agent == agent_id or agent in lower_than_agent:
             # Perform low-level search for the current agent
-            # path = f(starts[agent], goals[agent], grid, constraints, agent, window_size)
-
             path = space_time_astar(np.array(grid), starts[agent], goals[agent][:window_size], dynamic_constraints, edge_constraints)
-
+            
             if path is None:
                 return False  # No solution found for the current agent
-            
+
             mod_path = [(x, y) for (x, y, t) in path]
 
             node.plan[agent] = mod_path
-        
-            # for time, pos in enumerate(node.plan[agent]):
-            #     if time > window_size:
-            #         break
-            #     # Add a vertex constraint
-            #     constraints.append({'type': 'vertex', 'agent': agent, 'pos': pos, 'time': time})
-            #     # Add an edge constraint (to prevent moving into `a`'s next position)
-            #     if time < len(node.plan[agent]) - 1:
-            #         edge = (node.plan[agent][time], node.plan[agent][time + 1])
-            #         constraints.append({'type': 'edge', 'agent': agent, 'edge': edge, 'time': time + 1})
-
 
             for y, x, t in path:
                 if t > window_size:
                     break
                 dynamic_constraints[(y, x, t)] = agent
-            # add edge constraints (only add the first window elements)
-            for t, pos in enumerate(path):
-                if t > window_size:
-                    break
-                edge = ((path[t][0], path[t][1], path[t][2]), (path[t+1][0], path[t+1][1], path[t+1][2]))
-                edge_constraints[edge] = agent
+
+                if t < window_size:
+                    y_2, x_2, _ = path[t+1]
+                    edge = ((y, x, t), (y_2, x_2, t+1))
+                    edge_constraints[edge] = agent
 
     return True
 
@@ -693,8 +662,9 @@ def topological_sort_pbs(graph):
         raise ValueError("Graph has a cycle and cannot be topologically sorted.")
 
 
-def priority_based_search(grid, starts, goals, window_size, max_iter=10000):
+def priority_based_search(grid, starts, goals, window_size, max_time=10000):
     """Main PBS algorithm."""
+    start_time = time.time()
     root = Node()
     for agent, start in enumerate(starts):
         # path to next goal
@@ -711,12 +681,10 @@ def priority_based_search(grid, starts, goals, window_size, max_iter=10000):
     root.cost = sum(len(path) for path in root.plan.values())
     stack = [root]
 
-    iteration = 0
     while stack:
-        if iteration >= max_iter:
-            print("MAX PBS ITERATION REACHED")
+        if time.time() - start_time >= max_time:
+            print("MAX PBS TIME REACHED")
             return "No Solution"
-        iteration += 1
         
         node = stack.pop()
         collision = detect_collision(node.plan, window_size)
@@ -833,7 +801,6 @@ def generate_warehouse(rows, cols, num_agents, num_goals, seed=None):
 
     plt.imshow(warehouse, cmap=cmap, vmin=0, vmax=3)
 
-
     # generate random starts and goals
     station_locs = np.where(warehouse == 2)
     station_locs = np.array(list(zip(station_locs[0], station_locs[1])))
@@ -857,3 +824,4 @@ def generate_warehouse(rows, cols, num_agents, num_goals, seed=None):
         goal_locs = np.concatenate((goal_locs, new_shelves[:, None, :]), axis=1)
 
     return warehouse, start_locs, goal_locs
+

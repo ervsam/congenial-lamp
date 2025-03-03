@@ -359,17 +359,17 @@ clean up
 
 ## 17 FEB 2025
 1. training on warehouse map 25 agents
-. test results:
+- test results:
 - 35 agents
 - model throughput: 4.385
 - random throughput: 4.32
 
 2. use PBS for hard instances
-. fixing implementation
+- fixing implementation
 - assert new_start is not None
 - after reaching one goal, push to heap (open_set, (heuristic(current, goal), g, current, path)) not (open_set, (heuristic(current, goal), 0, current, path))
 - order of actions in st_astar has to match PBS implementation since tie break is going to affect PP
-. training on random_w_PBS with 19 agents
+- training on random_w_PBS with 19 agents
 
 3. use Qjt
 . see if Qjt has expressive enough by just training Qjt first
@@ -378,12 +378,10 @@ clean up
 - localize reward to 1 step away from pair
 - use curriculum learning (number of agents)
 
-
 ## 18 FEB 2025
 1. use PBS for hard instances
-. fixing implementation
+- fixing implementation
 - should only replan for aj where there exist ak < aj in partial prio N
-
 
 ## 19 FEB 2025
 1. use PBS for hard instances
@@ -393,7 +391,12 @@ clean up
 1. train again, with corrected PBS and DHC heur layer, use curriculum learning
 . on warehouse_1 map (4 rows, 2 col), train-warehouse_1
 
+## 23 FEB 2025
+1. generating result for PBS warehouse_2 in gen_results_warehouse2
+. running
 
+2. just realised that fulfillment warehouse map should go back and forth, but checked RHCR code and thats not the case. they just keep generating random goal locations from the shelves, not the start cells
+. so why is their throughput so low?
 
 
 # meet updates

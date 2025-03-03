@@ -97,7 +97,7 @@ class Environment:
             np.save(root+heuristic_map_file, self.heuristic_map)
 
         # FOR WHEN USING TRAINED MODEL
-        self.DHC_heur = self._get_DHC_heur()
+        # self.DHC_heur = self._get_DHC_heur()
 
     def _get_start_locs(self):
         # choose self.num_agents random starting positions
@@ -200,7 +200,7 @@ class Environment:
 
         self.goals = self._get_goals_locs()
 
-        self.DHC_heur = self._get_DHC_heur()
+        # self.DHC_heur = self._get_DHC_heur()
 
 
     def step(self, priorities):
@@ -290,21 +290,56 @@ class Environment:
             self.goals[agent] = self.goals[agent][goal_idx:]
             
             # remove DHC heurs of goals that are reached
-            self.DHC_heur[agent] = self.DHC_heur[agent][goal_idx:]
+            # self.DHC_heur[agent] = self.DHC_heur[agent][goal_idx:]
 
             while len(self.goals[agent]) <= self.window_size:
                 idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
                 new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
                 self.goals[agent] += new_goal
 
-                new_DHC_heur = self._get_DHC_heur_to_goal(new_goal[0])
-                self.DHC_heur[agent] = np.concatenate([self.DHC_heur[agent], np.expand_dims(new_DHC_heur, axis=0)], axis=0)
+                # new_DHC_heur = self._get_DHC_heur_to_goal(new_goal[0])
+                # self.DHC_heur[agent] = np.concatenate([self.DHC_heur[agent], np.expand_dims(new_DHC_heur, axis=0)], axis=0)
 
             self.paths[agent] = path[:self.window_size+1]
 
-            assert len(self.goals[agent]) == self.DHC_heur[agent].shape[0]
+            # assert len(self.goals[agent]) == self.DHC_heur[agent].shape[0]
 
         return self.starts, self.goals
+    
+    def step_PBS(self, paths):
+        self.goal_reached = 0
+        self.goal_reached_per_agent = [0 for _ in range(self.num_agents)]
+        self.paths = [[] for _ in range(self.num_agents)]
+
+        # update the starts and goals
+        for agent, path in enumerate(paths):
+            # update the start position of the agent
+            self.starts[agent] = (path[self.window_size][0], path[self.window_size][1])
+
+            # check if a goal is reached by going through the path
+            goal_idx = 0
+            for y, x in path[1:self.window_size+1]:
+                coord = (y, x)
+                # the agent finish its current task
+                if self.goals[agent] and coord == self.goals[agent][goal_idx]:
+                    self.goal_reached += 1
+                    self.goal_reached_per_agent[agent] += 1
+                    # self.logger.print(f"Environment.step(): Agent {agent} reached goal {goal_idx}")
+                    # look at next goal, did it reach that too?
+                    goal_idx += 1
+
+            # remove goals that are reached
+            self.goals[agent] = self.goals[agent][goal_idx:]
+            
+            while len(self.goals[agent]) <= self.window_size:
+                idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
+                new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
+                self.goals[agent] += new_goal
+
+            self.paths[agent] = path[:self.window_size+1]
+
+        return self.starts, self.goals
+
 
     def _get_fov(self, grid_map, x, y, fov):
         '''

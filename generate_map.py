@@ -8,7 +8,6 @@ from scipy.ndimage import label
 random.seed(0)
 np.random.seed(0)
 
-
 def generate_map(size_x, size_y, obstacle_density):
     total_elements = size_x * size_y
     num_ones = int(total_elements * obstacle_density)
