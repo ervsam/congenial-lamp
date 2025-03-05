@@ -29,9 +29,9 @@ random:
   root: "results/"
 
   environment:
-    SIZE: 14
-    NUM_AGENTS: 15
-    OBSTACLE_DENSITY: 0.5
+    SIZE: None
+    NUM_AGENTS: 20
+    OBSTACLE_DENSITY: None
     FOV: 7
     WINDOW_SIZE: 3
 
@@ -46,36 +46,11 @@ random:
     TRAIN_STEPS: 1e10
 
   paths:
-    results: "train/"
-    map_file: "maps/random_grid_map_1.npy"
-    heur_file: "maps/heuristic_map.npy"
+    results: "random_20/"
+    map_file: "maps/random_20/grid_map.npy"
+    heur_file: "maps/random_20/heuristic.npy"
     goals_locs: None
     start_locs: None
-
-random_w_PBS:
-  root: "results/"
-
-  environment:
-    SIZE: 14
-    NUM_AGENTS: 19
-    OBSTACLE_DENSITY: 0.5
-    FOV: 7
-    WINDOW_SIZE: 3
-
-  training:
-    OVERFIT_TEST: 0
-    LAMBDA: 1
-    N_ACTIONS: 2
-
-    BATCH_SIZE: 8
-    LR: 1e-4
-    BUFFER_SIZE: 10000
-    TRAIN_STEPS: 1e10
-
-  paths:
-    results: "random_w_PBS/"
-    map_file: "maps/random_grid_map_1.npy"
-    heur_file: "maps/heuristic_map.npy"
 
 
 # overfit
@@ -112,17 +87,19 @@ test:
 
   environment:
     SIZE: 14
-    NUM_AGENTS: 36
+    NUM_AGENTS: 70
     OBSTACLE_DENSITY: 0.5
     FOV: 7
     WINDOW_SIZE: 3
 
   paths:
     results: "test/"
-    map_file: "maps/warehouse.npy"
-    heur_file: "maps/heuristic_warehouse.npy"
-    goals_locs: "maps/warehouse_goals.npy"
-    start_locs: "maps/warehouse_starts.npy"
+    map_file: "maps/warehouse_2/grid_map.npy"
+    heur_file: "maps/warehouse_2/heuristic.npy"
+    goal_options: "maps/warehouse_2/goal_options.npy"
+    start_options: "maps/warehouse_2/start_options.npy"
+    start_locs: "maps/warehouse_2/start_locs_70N.pkl"
+    goal_locs: "maps/warehouse_2/goal_locs_70N.pkl"
 
 
 

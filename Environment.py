@@ -97,7 +97,9 @@ class Environment:
             np.save(root+heuristic_map_file, self.heuristic_map)
 
         # FOR WHEN USING TRAINED MODEL
-        # self.DHC_heur = self._get_DHC_heur()
+        self.use_QTRAN = False
+        if self.use_QTRAN:
+            self.DHC_heur = self._get_DHC_heur()
 
     def _get_start_locs(self):
         # choose self.num_agents random starting positions
@@ -200,7 +202,7 @@ class Environment:
 
         self.goals = self._get_goals_locs()
 
-        # self.DHC_heur = self._get_DHC_heur()
+        self.DHC_heur = self._get_DHC_heur()
 
 
     def step(self, priorities):
@@ -290,19 +292,22 @@ class Environment:
             self.goals[agent] = self.goals[agent][goal_idx:]
             
             # remove DHC heurs of goals that are reached
-            # self.DHC_heur[agent] = self.DHC_heur[agent][goal_idx:]
+            if self.use_QTRAN:
+                self.DHC_heur[agent] = self.DHC_heur[agent][goal_idx:]
 
             while len(self.goals[agent]) <= self.window_size:
                 idxs = np.random.choice(len(self.goal_loc_options), 1, replace=False)
                 new_goal = [tuple(self.goal_loc_options[idx]) for idx in idxs]
                 self.goals[agent] += new_goal
 
-                # new_DHC_heur = self._get_DHC_heur_to_goal(new_goal[0])
-                # self.DHC_heur[agent] = np.concatenate([self.DHC_heur[agent], np.expand_dims(new_DHC_heur, axis=0)], axis=0)
+                if self.use_QTRAN:
+                    new_DHC_heur = self._get_DHC_heur_to_goal(new_goal[0])
+                    self.DHC_heur[agent] = np.concatenate([self.DHC_heur[agent], np.expand_dims(new_DHC_heur, axis=0)], axis=0)
 
             self.paths[agent] = path[:self.window_size+1]
 
-            # assert len(self.goals[agent]) == self.DHC_heur[agent].shape[0]
+            if self.use_QTRAN:
+                assert len(self.goals[agent]) == self.DHC_heur[agent].shape[0]
 
         return self.starts, self.goals
     
@@ -478,11 +483,16 @@ class Environment:
 
         # Scatter plot of agent starting positions
         for agent, (x, y) in enumerate(self.starts):
-            plt.text(y, x, agent, c=self.colors[agent], size=12, ha='center', va='center')
+            plt.text(y, x, agent, c=self.colors[agent], size=6, ha='center', va='center')
 
         # Scatter plot of goal locations
+        # for agent, gs in enumerate(self.goals):
+        #     for idx, (x, y) in enumerate(gs):
+        #         plt.text(y, x, idx, c=self.colors[agent], size=6, ha='right', va='baseline')
         for agent, gs in enumerate(self.goals):
-            for idx, (x, y) in enumerate(gs):
-                plt.text(y, x, idx, c=self.colors[agent], size=6, ha='right', va='baseline')
+            x, y = gs[0]
+            plt.text(y, x, agent, c=self.colors[agent], size=3, ha='right', va='baseline')
 
+        # save figure
+        plt.savefig('current_state.png')
         plt.show()

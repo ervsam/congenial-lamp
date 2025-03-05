@@ -26,7 +26,7 @@ file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
 with open(file_path, "r") as file:
     config_file = yaml.safe_load(file)
 
-config = config_file["overfit"]
+config = config_file["random"]
 
 # CONFIGS
 env_config = config["environment"]
@@ -101,12 +101,27 @@ elif OVERFIT_TEST == 3:
     
 # %% TRAINING LOOP
 
-# env.starts = [(7, 8), (10, 12), (4, 2), (9, 7), (7, 1), (4, 3), (7, 4), (9, 6), (1, 2), (4, 1), (7, 7), (6, 1), (8, 7), (5, 1), (3, 3), (4, 14), (2, 3), (1, 3), (7, 2)]
-# env.goals = [[(4, 1), (2, 7), (7, 1), (5, 14)], [(13, 13), (8, 5), (5, 11), (11, 5)], [(2, 3), (1, 6), (6, 13), (13, 5)], [(3, 14), (5, 13), (8, 4), (4, 2)], [(1, 2), (8, 4), (3, 10), (1, 3)], [(2, 3), (4, 9), (3, 9), (7, 9)], [(1, 3), (11, 13), (9, 13), (3, 10)], [(10, 10), (4, 2), (6, 11), (12, 5)], [(7, 3), (3, 14), (12, 11), (8, 11)], [(2, 3), (8, 12), (7, 9), (7, 10)], [(11, 8), (2, 11), (5, 5), (12, 5)], [(4, 1), (4, 8), (7, 11), (9, 13)], [(13, 9), (3, 11), (10, 12), (4, 2)], [(4, 2), (7, 1), (11, 5), (7, 3)], [(1, 3), (14, 2), (2, 6), (8, 3)], [(4, 6), (10, 9), (9, 9), (12, 12)], [(1, 3), (10, 12), (8, 12), (5, 5)], [(1, 2), (10, 9), (11, 6), (11, 7)], [(3, 3), (4, 3), (8, 7), (8, 3)]]
-
 new_start, new_goals = env.starts, env.goals
 steps = 0
 while steps < TRAIN_STEPS:
+
+    # curriculum learning
+    # if average of 100 most recent loss is less than
+    if np.mean(losses[-100:]) < 3:
+        env_config["NUM_AGENTS"] = env.num_agents + 5
+
+        logger.print(f"moving on to {env_config['NUM_AGENTS']} agents", "\n")
+
+        env = Environment(env_config,
+                        logger=logger,
+                        grid_map_file=GRID_MAP_FILE,
+                        heuristic_map_file=HEURISTIC_MAP_FILE,
+                        start_loc_options=None,
+                        goal_loc_options=None,
+                        )
+
+        trainer = Trainer(LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env)
+    
     steps += 1
     timestep_start = time.time()
     logger.print("Step", steps, "\n")

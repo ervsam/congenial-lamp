@@ -41,6 +41,7 @@ import numpy as np
 import os.path
 import yaml
 import pickle
+import random
 
 from utils import *
 from Environment import Environment
@@ -48,6 +49,9 @@ from Model import QNetwork
 
 # set np seed
 np.random.seed(0)
+x = [1, 2, 3,4,5,6,7,8,9,10]
+np.random.shuffle(x)
+print(x)
 
 import os
 file_path = "config.yaml"
@@ -75,7 +79,7 @@ def simulate(env, logger, algorithm, q_net=None):
         if algorithm == "random_PP":
             while time.time() - start_time < TIMEOUT:
                 priorities = list(range(env.num_agents))
-                np.random.shuffle(priorities)
+                random.shuffle(priorities)
                 new_start, new_goals = env.step(priorities)
                 if new_start is not None:
                     solved = True
@@ -113,6 +117,8 @@ def simulate(env, logger, algorithm, q_net=None):
 
         if not solved:
             logger.print("Could not solve instance")
+            logger.print(env.starts, env.goals)
+            env.show_current_state()
             return goals_reached, runtimes
         else:
             runtimes.append(time.time()-start_time)
@@ -128,10 +134,10 @@ def simulate(env, logger, algorithm, q_net=None):
 
 TIMEOUT = 60
 TIMESTEP = 5000
-num_of_agents = [10, 20, 30, 40, 50]
+num_agents_list = [70]
 
-grid_map_list = ["random_20", "random_40", "random_60"]
-algorithm_list = ["random_PP", "PBS", "QTRAN"]
+grid_map_list = ["warehouse_2"]
+algorithm_list = ["random_PP"]
 # algorithm = "PBS"
 # grid_map = "warehouse_2"
 
@@ -170,10 +176,16 @@ for grid_map in grid_map_list:
         # for different number of agents
         # simulate for 5000 steps on given start and goal locations
 
-        logger.print("simulating for", num_of_agents, "using", algorithm, "on", grid_map, "\n")
+        # if results file exists, load it
+        if os.path.exists(dir_results+"results.pkl"):
+            with open(dir_results+"results.pkl", "rb") as f:
+                results = pickle.load(f)
+        else:
+            results = {}
 
-        results = {}
-        for num_agents in num_of_agents:
+        for num_agents in num_agents_list:
+            logger.print("simulating for", num_agents, "using", algorithm, "on", grid_map, "\n")
+
             results[num_agents] = {}
             START_LOCS = map_path + config["start_locs"] + f"{num_agents}N.pkl"
             GOAL_LOCS = map_path + config["goal_locs"] + f"{num_agents}N.pkl"
@@ -182,6 +194,8 @@ for grid_map in grid_map_list:
 
             env = Environment(env_config, logger=logger, grid_map_file=GRID_MAP_FILE, start_loc_options=START_OPTIONS,
                         goal_loc_options=GOAL_OPTIONS, heuristic_map_file=HEURISTIC_MAP_FILE, start_loc_file=START_LOCS, goal_loc_file=GOAL_LOCS)
+            
+            env.show_current_state()
 
             num_goals_reached, runtimes = simulate(env, logger, algorithm, q_net)
             results[num_agents]['num_goals_reached'] = num_goals_reached

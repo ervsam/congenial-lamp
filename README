@@ -72,11 +72,21 @@ LOG
 
 ## 23 FEB 2025
 1. generating result for PBS warehouse_2 in gen_results_warehouse2
-. running
 
 2. just realised that fulfillment warehouse map should go back and forth, but checked RHCR code and thats not the case. they just keep generating random goal locations from the shelves, not the start cells
-. so why is their throughput so low?
+- so why is their throughput so low?
+- forgot to divide by window_size = 3
 
+## 3 MAR 2025
+1. generating results for random maps
+
+2. train on random map using curriculum learning
+
+## 4 MAR 2025
+1. generating result for random_PP 70 agents on warehouse_2
+. changed np.random.shuffle to random.shuffle
+
+2. 5000 steps means 5000 agent steps, not 5000 * window steps
 
 # meet updates
 1. use Qjt

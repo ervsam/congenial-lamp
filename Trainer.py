@@ -302,8 +302,6 @@ class Trainer:
                             # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
                             local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10 ))
 
-
-
                     batch_max_local_rewards += local_rewards
 
                 # expand
