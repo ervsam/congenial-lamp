@@ -97,7 +97,7 @@ class Environment:
             np.save(root+heuristic_map_file, self.heuristic_map)
 
         # FOR WHEN USING TRAINED MODEL
-        self.use_QTRAN = False
+        self.use_QTRAN = True
         if self.use_QTRAN:
             self.DHC_heur = self._get_DHC_heur()
 

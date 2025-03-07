@@ -1,5 +1,5 @@
 # warehouse
-warehouse:
+warehouse_2:
   root: "results/"
 
   environment:
@@ -18,11 +18,11 @@ warehouse:
     TRAIN_STEPS: 1e10
 
   paths:
-    results: "warehouse_1/"
-    map_file: "maps/warehouse_1/grid_map.npy"
-    heur_file: "maps/warehouse_1/heuristic.npy"
-    goals_locs: "maps/warehouse_1/goal_options.npy"
-    start_locs: "maps/warehouse_1/start_options.npy"
+    results: "warehouse_2/"
+    map_file: "maps/warehouse_2/grid_map.npy"
+    heur_file: "maps/warehouse_2/heuristic.npy"
+    goals_locs: "maps/warehouse_2/goal_options.npy"
+    start_locs: "maps/warehouse_2/start_options.npy"
 
 # random
 random:

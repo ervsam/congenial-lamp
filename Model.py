@@ -44,7 +44,7 @@ class Encoder(nn.Module):
 
         self.obs_encoder = nn.Sequential(
             nn.Conv2d(self.layers, 32, 3, 1),
-            nn.LeakyReLU(True),
+            nn.LeakyReLU(),
             ResBlock(32),
             ResBlock(32),
 
@@ -53,7 +53,7 @@ class Encoder(nn.Module):
             # ResBlock(32),
             
             nn.Conv2d(32, 16, 1, 1),
-            nn.LeakyReLU(True),
+            nn.LeakyReLU(),
             nn.Flatten(),
             nn.Linear(400, self.hid_dim),
             # nn.Linear(128, 64),
@@ -129,10 +129,17 @@ class QNetwork(nn.Module):
         # FOV = 3 x fov x fov
 
         # batch_obs: b x n x [FOV]
-        batch_size, num_agents, channel, fov, _ = batch_obs.shape
+        batch_size = len(batch_obs)
+        num_agents_list = [obs.shape[0] for obs in batch_obs]
+        num_agents, channel, fov, _ = batch_obs[0].shape
 
         # b x n x [FOV] -> b*n x [FOV]
-        batch_obs = batch_obs.view(-1, channel, fov, fov)
+        tmp = []
+        for b in batch_obs:
+            for n in b:
+                tmp.append(n)
+        batch_obs = torch.stack(tmp)
+        # batch_obs = batch_obs.view(-1, channel, fov, fov)
 
         ##############################################
         # ENCODE
@@ -143,7 +150,14 @@ class QNetwork(nn.Module):
         #     f"Expected {(batch_size * num_agents, self.hid_dim)}, got {batch_encoded_obs.shape}"
 
         # reshape b*n x h -> b x n x h
-        batch_encoded_obs = batch_encoded_obs.view(batch_size, num_agents, -1)
+        # batch_encoded_obs = batch_encoded_obs.view(batch_size, num_agents, -1)
+        tmp = []
+        start = 0
+        for num_agents in num_agents_list:
+            t = batch_encoded_obs[start:start+num_agents]
+            tmp.append(t)
+            start += num_agents
+        batch_encoded_obs = tmp
 
         # assert batch_encoded_obs.shape == (batch_size, num_agents, self.hid_dim), \
         #     f"Expected {(batch_size, num_agents, self.hid_dim)}, got {batch_encoded_obs.shape}"
@@ -160,12 +174,12 @@ class QNetwork(nn.Module):
             stack_pair_encodings = []  # 'n_pairs' x 2 x h
 
             # for each close pair, calculate Q values
-            for agent_1, agent_2 in close_pairs:
+            for agents in close_pairs:
+                agent_1, agent_2 = agents[0], agents[1]
                 concat_pair_obs = torch.concatenate((encoded_obs[agent_1], encoded_obs[agent_2]))
 
                 # 2 x h
-                stack_pair_obs = torch.stack(
-                    ([encoded_obs[agent_1], encoded_obs[agent_2]]))
+                stack_pair_obs = torch.stack(([encoded_obs[agent_1], encoded_obs[agent_2]]))
                 assert stack_pair_obs.shape == (2, self.hid_dim), \
                     f"Expected {(2, self.hid_dim)}, got {stack_pair_obs.shape}"
 
@@ -189,8 +203,7 @@ class QNetwork(nn.Module):
                 # print("stack_pair_encodings")
                 # print(stack_pair_encodings)
 
-                obs_attended, _ = self.attention_layer(
-                    stack_pair_encodings, stack_pair_encodings, stack_pair_encodings)
+                obs_attended, attn_output_weights = self.attention_layer(stack_pair_encodings, stack_pair_encodings, stack_pair_encodings)
                 
                 # print("obs_attended")
                 # print(obs_attended)

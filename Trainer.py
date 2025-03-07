@@ -31,8 +31,6 @@ class Trainer:
         self.is_QTRAN_alt = is_QTRAN_alt
         self.LAMBDA = LAMBDA
 
-        self.memory = {}
-
         if not self.use_local_rewards:
             # copy weights from q_net to fixed_qjoint_net
             self.fixed_qjoint_net.load_state_dict(self.qjoint_net.state_dict())
@@ -51,7 +49,7 @@ class Trainer:
     def optimize(self, batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals):
         
         layers = 7
-        assert batch_obs.shape == (self.batch_size, self.num_agents, layers, self.fov, self.fov), f"Expected {(self.batch_size, self.num_agents, layers, self.fov, self.fov)}, got {batch_obs.shape}"
+        # assert batch_obs.shape == (self.batch_size, self.num_agents, layers, self.fov, self.fov), f"Expected {(self.batch_size, self.num_agents, layers, self.fov, self.fov)}, got {batch_obs.shape}"
 
         num_n_pairs = []
         for pp in batch_partial_prio:

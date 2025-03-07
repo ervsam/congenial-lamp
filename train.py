@@ -26,7 +26,7 @@ file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
 with open(file_path, "r") as file:
     config_file = yaml.safe_load(file)
 
-config = config_file["random"]
+config = config_file["warehouse_2"]
 
 # CONFIGS
 env_config = config["environment"]
@@ -103,12 +103,17 @@ elif OVERFIT_TEST == 3:
 
 new_start, new_goals = env.starts, env.goals
 steps = 0
+curriculum_loss = []
+
 while steps < TRAIN_STEPS:
 
     # curriculum learning
     # if average of 100 most recent loss is less than
-    if np.mean(losses[-100:]) < 3:
-        env_config["NUM_AGENTS"] = env.num_agents + 5
+    if np.mean(curriculum_loss[-100:]) < 3:
+        curriculum_loss = []
+        torch.save(trainer.q_net.state_dict(), saved_model_path+f"q_net_{steps}.pth")
+
+        env_config["NUM_AGENTS"] = env.num_agents + 2
 
         logger.print(f"moving on to {env_config['NUM_AGENTS']} agents", "\n")
 
@@ -120,7 +125,8 @@ while steps < TRAIN_STEPS:
                         goal_loc_options=None,
                         )
 
-        trainer = Trainer(LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env)
+        trainer.env = copy.deepcopy(env)
+        trainer.num_agents = env.num_agents
     
     steps += 1
     timestep_start = time.time()
@@ -310,6 +316,8 @@ while steps < TRAIN_STEPS:
         ltds.append(ltd)
         lopts.append(lopt)
         lnopts.append(lnopt)
+
+        curriculum_loss.append(loss)
 
         if is_prioritized:
             assert len(indices) == len(td_errors)

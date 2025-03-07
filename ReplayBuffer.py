@@ -81,7 +81,7 @@ class PrioritizedReplayBuffer:
         experiences = [self.buffer[idx] for idx in indices]
 
         obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals = zip(*[self.buffer[i] for i in indices])
-        return torch.stack(obs_fovs), partial_prio, torch.tensor(global_reward), local_rewards, groups, starts, goals, indices
+        return obs_fovs, partial_prio, torch.tensor(global_reward), local_rewards, groups, starts, goals, indices
 
         # Importance-sampling weights
         weights = (len(self.buffer) * probabilities[indices]) ** (-beta)

@@ -94,3 +94,7 @@ LOG
 - fix range to [0, 10]
 - makes Qjt easier to learn and converge to <1
 3. Q'jt is very small and V(s) close to reward because there isnt much difference between Q'jt(s, ui) and Q'jt(s, uj), meaning taking joint action ui vs uj dont make that much of a difference
+
+
+## 6 MAR 2025
+1. why is leakyrelu set to inplace=True in encoder? changed to default
