@@ -12,6 +12,7 @@ import copy
 import time
 import yaml
 import os
+import shutil
 
 from utils import *
 from Environment import Environment
@@ -48,11 +49,12 @@ DIR = config["root"] + paths_config["results"]
 saved_model_path = DIR + 'q_net_model/'
 log_path = DIR + "log/"
 
-if not os.path.exists(saved_model_path):
-    os.makedirs(saved_model_path)
-
-if not os.path.exists(log_path):
-    os.makedirs(log_path)
+if os.path.exists(saved_model_path):
+    shutil.rmtree(saved_model_path)
+os.makedirs(saved_model_path)
+if os.path.exists(log_path):
+    shutil.rmtree(log_path)
+os.makedirs(log_path)
 
 is_QTRAN_alt = True
 
@@ -109,7 +111,7 @@ while steps < TRAIN_STEPS:
 
     # curriculum learning
     # if average of 100 most recent loss is less than
-    if np.mean(curriculum_loss[-100:]) < 3:
+    if len(curriculum_loss) > 1000 and np.mean(curriculum_loss[-100:]) < 3:
         curriculum_loss = []
         torch.save(trainer.q_net.state_dict(), saved_model_path+f"q_net_{steps}.pth")
 
@@ -255,14 +257,10 @@ while steps < TRAIN_STEPS:
             set_s.update(pair)
         group_agents.append(list(set_s))
     for group in group_agents:
-        # local_rewards.append(sum([-delays[agent] for agent in group]))
+        local_rewards.append(10 * sum([-delays[agent] for agent in group]) / len(group))
         # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
-        local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
+        # local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
 
-
-
-    # global_reward = sum([-x/max_delay for x in env.get_delays()])/env.num_agents
-    # global_reward = 1 / (sum(env.get_delays()) + 1)
     logger.print("Global Reward:", global_reward, "\n")
     if len(groups) > 1:
         logger.print("Multiple groups detected")

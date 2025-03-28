@@ -55,12 +55,15 @@ class Encoder(nn.Module):
             nn.Conv2d(32, 16, 1, 1),
             nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(400, self.hid_dim),
+            nn.Linear(1296, self.hid_dim),
             # nn.Linear(128, 64),
             # nn.Linear(64, self.hid_dim)
         )
 
-    def forward(self, x):
+        self.encode_coords = nn.Linear(2, 32)
+        self.output = nn.Linear(self.hid_dim + 32, self.hid_dim)
+
+    def forward(self, x, coords):
         # x: n x 7 x 7 x 7
 
         # x = F.leaky_relu(self.conv1(x))
@@ -84,6 +87,10 @@ class Encoder(nn.Module):
 
         # OPTION 3: SACHA encoder
         x = self.obs_encoder(x)
+
+        c = self.encode_coords(coords)
+        x = torch.cat((x, c), dim=1)
+        x = self.output(x)
 
         return x
 
@@ -133,6 +140,17 @@ class QNetwork(nn.Module):
         num_agents_list = [obs.shape[0] for obs in batch_obs]
         num_agents, channel, fov, _ = batch_obs[0].shape
 
+        # take out the coordinates channel
+        coordinates = [torch.tensor(list(zip(obs[:, -1, 0, 0], obs[:, -1, 0, 1]))) for obs in batch_obs]
+        tmp = []
+        for coords in coordinates:
+            for coord in coords:
+                tmp.append(coord)
+        batch_coordinates = torch.stack(tmp)
+
+        # batch_obs = batch_obs[:, :, :-1]
+        batch_obs = [obs[:, :-1] for obs in batch_obs]
+
         # b x n x [FOV] -> b*n x [FOV]
         tmp = []
         for b in batch_obs:
@@ -144,7 +162,7 @@ class QNetwork(nn.Module):
         ##############################################
         # ENCODE
         # reshape b*n x [FOV] -> b*n x h
-        batch_encoded_obs = self.encoder(batch_obs)
+        batch_encoded_obs = self.encoder(batch_obs, batch_coordinates)
 
         # assert batch_encoded_obs.shape == (batch_size * num_agents, self.hid_dim), \
         #     f"Expected {(batch_size * num_agents, self.hid_dim)}, got {batch_encoded_obs.shape}"

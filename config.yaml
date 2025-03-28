@@ -3,9 +3,9 @@ warehouse_2:
   root: "results/"
 
   environment:
-    NUM_AGENTS: 25
-    FOV: 7
-    WINDOW_SIZE: 3
+    NUM_AGENTS: 50
+    FOV: 11
+    WINDOW_SIZE: 5
   
   training:
     OVERFIT_TEST: 0
@@ -14,11 +14,11 @@ warehouse_2:
 
     BATCH_SIZE: 8
     LR: 1e-4
-    BUFFER_SIZE: 10000
+    BUFFER_SIZE: 20000
     TRAIN_STEPS: 1e10
 
   paths:
-    results: "warehouse_2/"
+    results: "warehouse_2_avereward/"
     map_file: "maps/warehouse_2/grid_map.npy"
     heur_file: "maps/warehouse_2/heuristic.npy"
     goals_locs: "maps/warehouse_2/goal_options.npy"

@@ -374,7 +374,7 @@ class Environment:
             torch tensor: field of view for all agents
         '''
 
-        layers = 7
+        layers = 8
 
         obs = np.zeros((self.num_agents, layers, self.fov, self.fov), dtype=np.float32)
 
@@ -415,8 +415,14 @@ class Environment:
             obs[agent, 5] = self._get_fov(self.DHC_heur[agent][0][2], x, y, self.fov)
             obs[agent, 6] = self._get_fov(self.DHC_heur[agent][0][3], x, y, self.fov)
 
+            normalized_coord = np.zeros((self.fov, self.fov))
+            normalized_coord[0, 0] = y / self.size_x
+            normalized_coord[0, 1] = x / self.size_y
+            obs[agent, 7] = normalized_coord
+
         obs_fovs = torch.tensor(obs)
         obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)
+
         return obs_fovs
 
 
