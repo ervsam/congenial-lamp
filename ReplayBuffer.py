@@ -6,10 +6,8 @@ class ReplayBuffer:
         self.buffer_size = buffer_size
         self.buffer = []
 
-        self.episodes_in_buffer = 0
-
     def insert(self, obs_fovs, partial_prio, global_reward, local_rewards, groups):
-        if len(self.buffer) > self.buffer_size:
+        if len(self.buffer) == self.buffer_size:
             self.buffer.pop(0)
         self.buffer.append((obs_fovs, partial_prio, global_reward, local_rewards, groups))
 
@@ -25,7 +23,7 @@ class ReplayBuffer:
 
 
 class PrioritizedReplayBuffer:
-    def __init__(self, capacity, alpha=0.6):
+    def __init__(self, capacity, alpha=0.8, freeze=False):
         """
         Initialize the prioritized experience replay buffer.
         
@@ -39,6 +37,8 @@ class PrioritizedReplayBuffer:
         self.priorities = np.zeros((capacity,), dtype=np.float32)
         self.pos = 0
 
+        self.freeze = freeze
+
     def insert(self, obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals, td_error=None):
         """
         Add a new experience to the buffer.
@@ -47,7 +47,11 @@ class PrioritizedReplayBuffer:
             experience (tuple): A single experience tuple (state, action, reward, next_state, done).
             td_error (float): Temporal-Difference error used to calculate priority.
         """
-        experience = (obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals) 
+
+        if len(self.buffer) >= 64 and self.freeze == True:
+            return
+
+        experience = (obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals)
         max_priority = self.priorities.max() if self.buffer else 1.0
 
         if len(self.buffer) < self.capacity:
@@ -75,20 +79,20 @@ class PrioritizedReplayBuffer:
             raise ValueError("The replay buffer is empty.")
 
         priorities = self.priorities[:len(self.buffer)]
-        probabilities = priorities / priorities.sum()
+        probabilities = (priorities + 1e-8) / (priorities + 1e-8).sum()
 
-        indices = np.random.choice(len(self.buffer), batch_size, p=probabilities)
-        experiences = [self.buffer[idx] for idx in indices]
+        indices = np.random.choice(len(self.buffer), batch_size, p=probabilities, replace=False)
+        # experiences = [self.buffer[idx] for idx in indices]
 
         obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals = zip(*[self.buffer[i] for i in indices])
-        return obs_fovs, partial_prio, torch.tensor(global_reward), local_rewards, groups, starts, goals, indices
 
-        # Importance-sampling weights
         weights = (len(self.buffer) * probabilities[indices]) ** (-beta)
-        weights /= weights.max()  # Normalize weights
+        weights /= weights.max()
 
-        return experiences
-    # , indices, weights
+        global_reward = torch.tensor(global_reward, dtype=torch.float32)
+
+        return obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals, indices, weights
+
 
     def update_priorities(self, indices, td_errors):
         """
@@ -98,9 +102,28 @@ class PrioritizedReplayBuffer:
             indices (list): Indices of experiences to update.
             td_errors (list): Corresponding TD errors.
         """
-        print("PrioritizedReplayBuffer.update_priorities error: ", td_errors)
+        # print("PrioritizedReplayBuffer.update_priorities error: ", td_errors)
         for idx, error in zip(indices, td_errors):
             self.priorities[idx] = (abs(error) + 1e-5) ** self.alpha
 
     def __len__(self):
         return len(self.buffer)
+    
+    def save_to_file(self, filename):
+        """
+        Print the last 500 experiences in the buffer to csv file.
+        """
+        with open(filename, 'w') as f:
+            for experience in self.buffer[-500:]:
+                # (obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals)
+                obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals = experience
+
+                # Convert each element to string and write to file
+                # f.write(str(partial_prio) + ',')
+                f.write(str(global_reward).replace(",", ";") + ',')
+                f.write(str([round(x, 2) for x in local_rewards]).replace(",", ";") + ',')
+                f.write(str(groups).replace(",", ";") + ',')
+                f.write(str(starts).replace(",", ";") + ',')
+                f.write(str(goals).replace(",", ";") + '\n')
+
+        print(f"Buffer saved to {filename}")

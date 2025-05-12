@@ -8,6 +8,8 @@ import pickle
 
 from utils import *
 
+import time
+
 np.random.seed(0)
 
 class Environment:
@@ -311,6 +313,63 @@ class Environment:
 
         return self.starts, self.goals
     
+    def step_per_group(self, priorities):
+        self.goal_reached = 0
+        self.optimal_goal_reached = 0
+        self.goal_reached_per_agent = [0 for _ in range(self.num_agents)]
+        self.optimal_goal_reached_per_agent = [0 for _ in range(self.num_agents)]
+        # clear the dynamic constraints and edge constraints
+        self.dynamic_constraints.clear()
+        self.edge_constraints.clear()
+        # clear the paths
+        self.paths = [[] for _ in range(self.num_agents)]
+
+        self.actual_path_lengths = {}
+        self.optimal_path_lengths = {}
+
+        temp_paths = []
+        temp_opt_paths = []
+
+        for agent in priorities:
+            goals_to_plan = self.goals[agent][:self.window_size]
+            path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
+
+            if path is None:
+                return None
+
+            temp_paths.append(path)
+            self.actual_path_lengths[agent] = path
+
+            optimal_path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, {}, {})
+
+            temp_opt_paths.append(optimal_path)
+            self.optimal_path_lengths[agent] = optimal_path
+
+            self.optimal_starts[agent] = (optimal_path[self.window_size][0], optimal_path[self.window_size][1])
+
+            # add path to dynamic constraints (only add the first window_size elements)
+            for y, x, t in path:
+                if t > self.window_size:
+                    break
+                self.dynamic_constraints[(y, x, t)] = agent
+            # add edge constraints (only add the first window_size elements)
+            try:
+                # for i in range(self.window_size):
+                for t, pos in enumerate(path):
+                    if t > self.window_size:
+                        break
+                    edge = ((path[t][0], path[t][1], path[t][2]), (path[t+1][0], path[t+1][1], path[t+1][2]))
+                    self.edge_constraints[edge] = agent
+            except IndexError:
+                self.logger.print("IndexError: path is too short")
+                self.logger.print(path)
+
+        delays = {}
+        for agent in priorities:
+            delays[agent] = len(self.actual_path_lengths[agent]) - len(self.optimal_path_lengths[agent])
+        return delays
+
+    
     def step_PBS(self, paths):
         self.goal_reached = 0
         self.goal_reached_per_agent = [0 for _ in range(self.num_agents)]
@@ -362,7 +421,7 @@ class Environment:
             numpy array: field of view
         '''
         max_val = np.max(grid_map)
-        padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=max_val)
+        padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=0)
         return padded_grid[x:x+fov, y:y+fov]
 
     def get_obs(self):
@@ -393,7 +452,9 @@ class Environment:
             obs[agent, 1] = self._get_fov(agent_map, x, y, self.fov)
 
             # 2. HEURISTIC TO GOAL
-            heur = self._get_fov(self.heuristic_map[goal[0]], x, y, self.fov)
+            # heur = self._get_fov(self.heuristic_map[goal[0]], x, y, self.fov)
+            padded_grid = np.pad(self.heuristic_map[goal[0]], pad_width=self.fov//2, mode='constant', constant_values=np.inf)
+            heur = padded_grid[x:x+self.fov, y:y+self.fov]
             # normalize the heuristic map
             max_val = np.max(heur[heur < np.inf])
             obs[agent, 2] = heur / max_val
@@ -421,7 +482,7 @@ class Environment:
             obs[agent, 7] = normalized_coord
 
         obs_fovs = torch.tensor(obs)
-        obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(-1), obs_fovs)
+        obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(1), obs_fovs)
 
         return obs_fovs
 

@@ -4,19 +4,30 @@ import torch.nn as nn
 import torch
 import numpy as np
 
+from torchviz import make_dot
+
+
 from utils import *
 from Model import QNetwork, QJoint, VJoint
 
+USE_GPU = False
+if USE_GPU:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+else:
+    device = torch.device("cpu")
+
 class Trainer:
     def __init__(self, LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env):
+        self.DEBUG = 0
+
         self.hidden_dim = 32
 
         self.env = copy.deepcopy(env)
 
-        self.q_net = QNetwork()
-        self.qjoint_net = QJoint()
-        self.fixed_qjoint_net = QJoint()
-        self.vnet = VJoint()
+        self.q_net = QNetwork().to(device)
+        self.qjoint_net = QJoint().to(device)
+        self.fixed_qjoint_net = QJoint().to(device)
+        self.vnet = VJoint().to(device)
 
         self.update_every = 10
         self.counter = 0
@@ -36,10 +47,16 @@ class Trainer:
 
         self.params = list({p for net in [self.q_net, self.qjoint_net, self.vnet] for p in net.parameters()})
 
-        self.optimizer = optim.Adam(self.params, lr=LR)
-        self.criterion = nn.MSELoss()
+        # self.optimizer = optim.Adam(self.params, lr=LR)
+        self.optimizer = optim.AdamW(self.params, lr=LR, weight_decay=1e-4)
 
-    def optimize(self, batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals):
+        self.criterion = nn.MSELoss(reduction="mean")
+
+    def optimize(self, batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, logger, weights):
+
+        # move to device
+        batch_obs = [obs.to(device) for obs in batch_obs]
+        batch_global_reward = batch_global_reward.to(device)
         
         layers = 7
         # assert batch_obs.shape == (self.batch_size, self.num_agents, layers, self.fov, self.fov), f"Expected {(self.batch_size, self.num_agents, layers, self.fov, self.fov)}, got {batch_obs.shape}"
@@ -49,16 +66,19 @@ class Trainer:
             num_n_pairs.append(len(pp.values()))
 
         batch_close_pairs = [list(pp.keys()) for pp in batch_partial_prio]
+        if self.DEBUG:
+            logger.print("batch_close_pairs:", batch_close_pairs)
 
         ### COMPUTE Q VALUES FOR EACH PAIR
         batch_pair_enc, batch_q_vals = self.q_net(batch_obs, batch_close_pairs)
         # batch_pair_enc: b x 'n_pairs' x h*2
         # batch_q_vals: b x 'n_pairs' x 2
+        if self.DEBUG:
+            logger.print("batch_pair_enc:", batch_pair_enc)
 
         # Vjt
         group_pair_enc = []
         for groups, pair_enc, close_pairs in zip(batch_groups, batch_pair_enc, batch_close_pairs):
-
             for group in groups:
                 subgroup_pair_enc = []
                 for pair, enc in zip(close_pairs, pair_enc):
@@ -75,10 +95,12 @@ class Trainer:
         batch_actions = []
         for pp in batch_partial_prio:
             batch_actions += list(pp.values())
-        batch_actions = torch.stack(batch_actions)
+        batch_actions = torch.stack(batch_actions).to(device)
 
         # batch_actions = torch.tensor([list(pp.values()) for pp in batch_partial_prio]).view(-1, 1)
-        batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze()
+        batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze().to(device)
+        if self.DEBUG:
+            logger.print("batch_onehot_actions:", batch_onehot_actions)
 
         # flatten batch_q_vals
         tmp = []
@@ -94,12 +116,28 @@ class Trainer:
 
         batch_q_chosen = torch.gather(flatten_batch_q_vals, dim=1, index=batch_actions).squeeze()
         batch_pair_enc_action = torch.concat([batch_pair_enc, batch_onehot_actions], dim=1)
+        if self.DEBUG:
+            logger.print("batch_pair_enc_action:", batch_pair_enc_action)
+            logger.print("shape of batch_pair_enc_action:", batch_pair_enc_action.shape)
 
         # Qjt
         q_jt, q_jt_alt = self.qjoint_net(batch_pair_enc, batch_pair_enc_action, batch_close_pairs, batch_groups, num_n_pairs)
         # assert q_jt.shape == (BATCH_SIZE, 1), f"Expected {(BATCH_SIZE, 1)}, got {q_jt.shape}"
         fixed_q_jt, fixed_q_jt_alt = self.fixed_qjoint_net(batch_pair_enc, batch_pair_enc_action, batch_close_pairs, batch_groups, num_n_pairs)
         # assert fixed_q_jt.shape == (BATCH_SIZE, 1), f"Expected {(BATCH_SIZE, 1)}, got {fixed_q_jt.shape}"
+
+        # torchviz
+        # dot = make_dot(q_jt_alt[0][0],  # ← be sure it’s a scalar
+        #        params=dict(self.qjoint_net.named_parameters()))
+        # dot.render('qtran_joint_graph', format='png')
+
+        # keep only φ2 parameters
+        # pars = dict(self.qjoint_net.phi2.named_parameters())
+
+        # dot  = make_dot(q_jt_alt[0][0], params=pars,
+        #                 show_attrs=False, show_saved=False)
+        # dot.render('phi2_subgraph', format='png')
+
 
         ### GET MAX Q VALUES
         batch_max_actions = torch.argmax(flatten_batch_q_vals, dim=1).view(-1, 1)
@@ -147,13 +185,14 @@ class Trainer:
                 for group in groups:
                     num_pairs_in_group.append(len(group))
             
-
             # q_jt_alt: b x 'n_pairs' x N_ACTIONS
             # flatten q_jt_alt
             tmp = []
             for t in q_jt_alt:
                 tmp += t
             q_jt_alt = torch.stack(tmp) # b * 'n_pairs' x N_ACTIONS
+            if self.DEBUG:
+                logger.print("q_jt_alt:", q_jt_alt)
 
             tmp = []
             for t in fixed_q_jt_alt:
@@ -164,6 +203,9 @@ class Trainer:
 
             selected_Q = torch.sum(q_jt_alt * batch_onehot_actions, dim=1).unsqueeze(1) # b x 1
 
+            if self.DEBUG:
+                logger.print("selected_Q")
+                logger.print(selected_Q)
 
             tmp = []
             for idx, num in enumerate(num_n_pairs):
@@ -173,7 +215,7 @@ class Trainer:
             tmp = []
             for r in batch_local_rewards:
                 tmp += r
-            batch_local_rewards = torch.tensor(tmp, dtype=torch.float32)
+            batch_local_rewards = torch.tensor(tmp, dtype=torch.float32, device=device)
 
             # expand
             tmp = []
@@ -182,11 +224,77 @@ class Trainer:
             batch_local_rewards = torch.stack(tmp)
 
             # print("selected_Q.shape, batch_local_rewards.shape)", selected_Q.shape, batch_local_rewards.shape)
+            assert selected_Q.shape == batch_local_rewards.unsqueeze(1).shape, f"Expected {selected_Q.shape}, got {batch_local_rewards.unsqueeze(1).shape}"
 
+            ltd_raw = F.mse_loss(selected_Q, batch_local_rewards.unsqueeze(1), reduction='none').squeeze(1) 
+            if self.DEBUG:
+                logger.print("ltd_raw:")
+                logger.print(ltd_raw)
 
-            ltd = self.criterion(selected_Q, batch_local_rewards.unsqueeze(1))
+            dup_factor = torch.tensor(num_pairs_in_group, device=device)
+            norm = torch.tensor(dup_factor).repeat_interleave(dup_factor)
+            if self.DEBUG:
+                logger.print("norm:")
+                logger.print(norm)
+            ltd_pairs = ltd_raw / norm          # both (N,)
 
-            tmp = torch.tensor([])
+            if self.DEBUG:
+                logger.print("ltd_pairs:")
+                logger.print(ltd_pairs)
+
+            # --- aggregate to group level -------------------------------------------
+            group_ltd = []                                             # store tensors
+            cursor = 0
+            for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
+                group_ltd.append(ltd_pairs[cursor:cursor+n].sum())     # tensor with grad
+                cursor += n
+            group_ltd = torch.stack(group_ltd).to(device)                         # (G,) keeps grad
+
+            # print group ltd
+            if self.DEBUG:
+                logger.print("ltd in group:", group_ltd)
+                logger.print("group_ltd shape:", group_ltd.shape)
+                         
+            weights = torch.as_tensor(weights, device=device, dtype=group_ltd.dtype)
+            exp_w = torch.repeat_interleave(weights, torch.as_tensor([len(g) for g in batch_groups], device=device))
+            
+            # --- aggregate to episode level -------------------------------------------
+            # episode_ltd = []                                           # length = batch_size
+            # cursor = 0
+            # if self.DEBUG:
+            #     logger.print("batch_groups len:", [len(groups) for groups in batch_groups])
+            # for groups in batch_groups:                                # list-of-lists
+            #     k = len(groups)
+            #     episode_ltd.append(group_ltd[cursor:cursor+k].mean())  # tensor with grad
+            #     cursor += k
+            # episode_ltd = torch.stack(episode_ltd)                     # (B,) keeps grad
+
+            # if self.DEBUG:
+            #     logger.print("ltd in episode:", episode_ltd)
+
+            # assert len(episode_ltd) == len(batch_obs), f"Expected {len(batch_obs)}, got {len(episode_ltd)}"
+
+            # weights = torch.as_tensor(weights,                               # shape (B,)
+            #         device=episode_ltd.device,
+            #         dtype=episode_ltd.dtype)
+            
+            # if self.DEBUG:
+            #     logger.print("weights:", weights)
+
+            # y_is_rare = (batch_local_rewards.abs() > 0.5).float()      # 0 or 1 target
+
+            # logit   = self.qjoint_net.rare_head(batch_pair_enc).squeeze()   # (total_pairs,)
+            # bce     = F.binary_cross_entropy_with_logits(logit, y_is_rare)
+            
+            # ltd = (weights * episode_ltd).mean()        # scalar; gradient flows into Q-net
+            ltd = (exp_w * group_ltd).mean()
+
+            # ltd   = ltd + 0.2 * bce
+
+            if self.DEBUG:
+                logger.print("ltd:", ltd)
+
+            tmp = torch.tensor([], device=device)
             for t in q_jt_max_alt:
                 tmp = torch.concat([tmp, t])
             q_jt_max_alt = tmp
@@ -198,18 +306,32 @@ class Trainer:
             tmp = []
             for idx, num in enumerate(num_pairs_in_group):
                 tmp += [q_prime_max[idx]] * num
-            q_prime_max = torch.stack(tmp)
+            q_prime_max = torch.stack(tmp).to(device)
             tmp = []
             for idx, num in enumerate(num_pairs_in_group):
                 tmp += [vtot[idx]] * num
-            vtot = torch.stack(tmp)
+            vtot = torch.stack(tmp).to(device)
 
-            # vtot = torch.zeros_like(vtot)
+            if self.DEBUG:
+                print("q_prime_max.shape, max_Q.shape, vtot.shape)", q_prime_max.shape, max_Q.shape, vtot.shape)
 
-            # print("q_prime_max.shape, max_Q.shape, vtot.shape)", q_prime_max.shape, max_Q.shape, vtot.shape)
+            lopt_pairs = (q_prime_max - max_Q + vtot) ** 2
+            # --- aggregate to group level -------------------------------------------
+            group_lopt = []                                             # store tensors
+            cursor = 0
+            for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
+                group_lopt.append(lopt_pairs[cursor:cursor+n].sum())     # tensor with grad
+                cursor += n
+            group_lopt = torch.stack(group_lopt).to(device)                         # (G,) keeps grad
 
-            lopt = torch.mean((q_prime_max - max_Q + vtot) ** 2)
-            print("maxQ:", max_Q[:9])
+            if self.DEBUG:
+                logger.print("group lopt:", group_lopt)
+                logger.print("group lopt shape:", group_lopt.shape)
+
+            lopt = group_lopt.mean()
+
+            if self.DEBUG:
+                logger.print("lopt in group:", lopt)
 
             # revert
             tmp = []
@@ -233,96 +355,99 @@ class Trainer:
             for uj, q_i in zip(q_uj, q_is):
                 t = uj - q_i + torch.sum(q_i, dim=0, keepdim=True)
                 q_prime_alt += (t)
-            q_prime_alt = torch.stack(q_prime_alt)
+            q_prime_alt = torch.stack(q_prime_alt).to(device)
 
-            # print("q_prime_alt.shape, fixed_q_jt_alt.shape, vtot.shape)", q_prime_alt.shape, fixed_q_jt_alt.shape, vtot.shape)
+            if self.DEBUG:
+                print("q_prime_alt.shape, fixed_q_jt_alt.shape, vtot.shape)", q_prime_alt.shape, fixed_q_jt_alt.shape, vtot.shape)
 
+            ########################################### Qjt(ui, u_-i) ############################################
 
-            ########################################### Qjt(ui, u_-i) ##################################################
+            lnopt_min_pairs = torch.min(q_prime_alt - fixed_q_jt_alt.detach() + vtot, dim=1).values ** 2
+            # --- aggregate to group level -------------------------------------------
+            group_lnopt = []                                             # store tensors
+            cursor = 0
+            for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
+                group_lnopt.append(lnopt_min_pairs[cursor:cursor+n].sum())     # tensor with grad
+                cursor += n
+            group_lnopt = torch.stack(group_lnopt).to(device) # (G,) keeps grad
 
-            lnopt_min = torch.mean(torch.min(q_prime_alt - fixed_q_jt_alt.detach() + vtot, dim=1).values ** 2)
+            if self.DEBUG:
+                logger.print("group lnopt:", group_lnopt)
+                logger.print("group lnopt shape:", group_lnopt.shape)
 
-            # loss = ltd + self.LAMBDA * lopt + self.LAMBDA * lnopt_min
-            loss = ltd
-            # + torch.mean(vtot ** 2)
-
+            lnopt_min = group_lnopt.mean()
             lnopt = lnopt_min
 
-            a = torch.abs(selected_Q - batch_local_rewards.unsqueeze(1)).detach().numpy()
-            b = torch.abs(max_Q - q_prime_max + vtot).detach().numpy()
-            c = np.mean(torch.abs(q_prime_alt - fixed_q_jt_alt.detach() + vtot).detach().numpy(), axis=1, keepdims=True)
+            loss = ltd + self.LAMBDA * lopt + self.LAMBDA * lnopt_min
 
-            # td_errors = a + b + c
-            td_errors = a
+            td_errors = []                 # length = batch_size
+            cursor = 0
+            for groups in batch_groups:      # list-of-lists
+                k = len(groups)
+                err = torch.max(group_ltd[cursor:cursor+k])
+                td_errors.append(err)
+                cursor += k
+            td_errors = torch.stack(td_errors).to(device)
+            td_errors = td_errors.detach().cpu().numpy()
 
-            # tmp = []
-            # for q in q_prime:
-            #     tmp += q
-            # q_prime = torch.stack(tmp).unsqueeze(1)
+            if self.DEBUG:
+                logger.print("td_errors:", td_errors)
+
             tmp = []
             for idx, num in enumerate(num_pairs_in_group):
                 tmp += [q_prime[idx]] * num
-            q_prime = torch.stack(tmp)
+            q_prime = torch.stack(tmp).to(device)
 
-            print("q_prime:", q_prime.shape)
-            print("vtot:", vtot.shape)
-
-            tmp = []
-            start = 0
-            for num in num_n_pairs:
-                Q = np.mean(td_errors[start:start+num])
-                tmp.append(Q)
-                start += num
-            td_errors = tmp # b x N_ACTIONS
-
-        else:
-            # q_jt : b x 'groups' x 1
-            tmp = []
-            for q in q_jt:
-                tmp += q
-            q_jt = torch.stack(tmp)
+        # not QTRAN_alt
+        # else:
+        #     # q_jt : b x 'groups' x 1
+        #     tmp = []
+        #     for q in q_jt:
+        #         tmp += q
+        #     q_jt = torch.stack(tmp)
             
-            tmp = []
-            for r in batch_local_rewards:
-                tmp += r
-            batch_local_rewards = torch.tensor(tmp, dtype=torch.float32)
+        #     tmp = []
+        #     for r in batch_local_rewards:
+        #         tmp += r
+        #     batch_local_rewards = torch.tensor(tmp, dtype=torch.float32)
 
-            ltd = self.criterion(q_jt, batch_local_rewards.unsqueeze(1))
+        #     ltd = self.criterion(q_jt, batch_local_rewards.unsqueeze(1))
 
-            # q_jt_max : b x 'groups' x 1
-            tmp = []
-            for q in q_jt_max:
-                tmp += q
-            q_jt_max = torch.stack(tmp)
+        #     # q_jt_max : b x 'groups' x 1
+        #     tmp = []
+        #     for q in q_jt_max:
+        #         tmp += q
+        #     q_jt_max = torch.stack(tmp)
 
-            # q_prime_max : b x 'groups' x 1
-            tmp = []
-            for q in q_prime_max:
-                tmp += q
-            q_prime_max = torch.stack(tmp).unsqueeze(1)
+        #     # q_prime_max : b x 'groups' x 1
+        #     tmp = []
+        #     for q in q_prime_max:
+        #         tmp += q
+        #     q_prime_max = torch.stack(tmp).unsqueeze(1)
             
-            lopt = torch.mean((q_prime_max - q_jt_max + vtot) ** 2)
+        #     lopt = torch.mean((q_prime_max - q_jt_max + vtot) ** 2)
 
-            # fixed_q_jt : b x 'groups' x 1
-            tmp = []
-            for q in fixed_q_jt:
-                tmp += q
-            fixed_q_jt = torch.stack(tmp)
+        #     # fixed_q_jt : b x 'groups' x 1
+        #     tmp = []
+        #     for q in fixed_q_jt:
+        #         tmp += q
+        #     fixed_q_jt = torch.stack(tmp)
 
-            # q_prime : b x 'groups' x 1
-            tmp = []
-            for q in q_prime:
-                tmp += q
-            q_prime = torch.stack(tmp).unsqueeze(1)
+        #     # q_prime : b x 'groups' x 1
+        #     tmp = []
+        #     for q in q_prime:
+        #         tmp += q
+        #     q_prime = torch.stack(tmp).unsqueeze(1)
 
-            lnopt = torch.mean(torch.min(q_prime - fixed_q_jt + vtot, torch.zeros_like(fixed_q_jt)) ** 2)
+        #     lnopt = torch.mean(torch.min(q_prime - fixed_q_jt + vtot, torch.zeros_like(fixed_q_jt)) ** 2)
 
-            loss = ltd + self.LAMBDA * lopt + self.LAMBDA * lnopt
-            # loss = self.LAMBDA * lopt + self.LAMBDA * lnopt
-            # + torch.mean(vtot ** 2)
+        #     loss = ltd + self.LAMBDA * lopt + self.LAMBDA * lnopt
+        #     # loss = self.LAMBDA * lopt + self.LAMBDA * lnopt
+        #     # + torch.mean(vtot ** 2)
 
         self.optimizer.zero_grad()
         loss.backward()
+        logger.print("grad:", torch.nn.utils.clip_grad_norm_(self.qjoint_net.parameters(), max_norm=10))
         self.optimizer.step()
 
         self.counter += 1

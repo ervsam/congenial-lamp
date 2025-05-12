@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 import copy
+import random
 
 from st_astar import space_time_astar
 
@@ -194,7 +195,30 @@ class DirectedGraph:
         # If visited nodes are less than total nodes, there is a cycle
         return visited_count != len(indegree)
 
-def sample_priorities(env, logger, close_pairs, preds, policy='random'):
+class SafeGraph:
+    def __init__(self, n):
+        self.n = n
+        self.adj = {i: set() for i in range(n)}
+        self.reach = {i: set() for i in range(n)}  # transitive closure approximation
+
+    def add_edge(self, u, v):
+        if u == v or v in self.reach[u]:  # would create a cycle
+            return False
+
+        # Add edge safely
+        self.adj[u].add(v)
+
+        # Update reachable sets
+        # Everyone who can reach u now can also reach v and v's reachable
+        for x in range(self.n):
+            if u in self.reach[x]:
+                self.reach[x].update(self.reach[v])
+                self.reach[x].add(v)
+        self.reach[u].update(self.reach[v])
+        self.reach[u].add(v)
+        return True
+
+def sample_priorities(env, logger, close_pairs, preds, policy='random', epsilon=0.1):
     MAX_TRIES_RESOLVE_CYCLE = 3*len(env.get_close_pairs())
 
     # Sample an praction based on the probabilities
@@ -205,6 +229,12 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random'):
         actions = torch.randint(0, 2, (len(close_pairs), 1))
     elif policy == 'greedy':
         actions = torch.argmax(preds, dim=1).view(-1, 1)
+    elif policy == 'epsilon_greedy':
+        actions = torch.multinomial(probs, 1)
+        if random.random() < epsilon:
+            actions = torch.randint(0, 2, (len(close_pairs), 1))
+        else:
+            actions = torch.argmax(preds, dim=1).view(-1, 1)
 
     pairs_action = {}
     pair_qval = {}
@@ -309,52 +339,13 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random'):
     return priorities, partial_prio, pred_value
 
 
-def step(env, logger, throughput, q_vals, policy="random"):
-    """
-    Executes a single step in the environment by determining priority ordering for agents and updating their positions accordingly.
-
-    Parameters
-    ==========
-    env : Environment
-        The multi-agent environment in which agents navigate and interact.
-    logger : Logger
-        Utility for logging messages and debugging information.
-    throughput : list
-        A list tracking the number of agents that reach their goals.
-    q_vals : array or None
-        Q-values used to sample priority ordering. If None, a default ordering is used.
-    policy : str, optional (default="random")
-        The policy used to sample priorities (e.g., "random" or another predefined method).
-
-    Process
-    =======
-    1. If `q_vals` is None, assign default priorities and take an environment step.
-    2. Otherwise, attempt to sample feasible priorities using `q_vals`.
-    3. If a cycle is detected, reset the environment and skip the instance.
-    4. If priorities are not feasible, resample up to `MAX_TRIES` times.
-    5. If a feasible priority ordering is found, take a step in the environment.
-    6. If after `MAX_TRIES` no feasible ordering is found, reset the environment.
-
-    Returns
-    =======
-    priorities : list or None
-        The sampled priority ordering of agents, or None if unresolvable.
-    partial_prio : list or None
-        Partial priority information from sampling, or None if unresolvable.
-    pred_value : float or None
-        Predicted value from priority sampling, or None if unresolvable.
-    new_start : list or None
-        Updated agent start positions, or None if unresolvable.
-    new_goals : list or None
-        Updated agent goal positions, or None if unresolvable.
-    throughput : list
-        Updated throughput list tracking goal completions.
-    """
+def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsilon=0.1, obs_fovs=None, buffer=None, old_start=None, old_goals=None):    
+    USE_PENALTY = False
 
     if q_vals is None:
         priorities = list(range(env.num_agents))
+        start_time = time.time()
         new_start, new_goals = env.step(priorities)
-
         logger.print("Time to env.step:", time.time()-start_time)
         if new_start is not None:
             throughput.append(env.goal_reached)
@@ -363,40 +354,14 @@ def step(env, logger, throughput, q_vals, policy="random"):
     close_pairs = env.get_close_pairs()
     
     # while priorities are not feasible, sample new pairwise priorities
-    tries = 0
-    MAX_TRIES = 100
-    while tries < MAX_TRIES:
-        tries += 1
-        priorities, partial_prio, pred_value = sample_priorities(env, logger, close_pairs, q_vals[0], policy=policy)
-        
-        # cycle unresolvable
-        if priorities is None:
-            logger.print("Cycle unresolved, skipping instance\n")
-            env.reset()
-            new_start, new_goals = env.starts, env.goals
-            return None, None, None, None, None, throughput
-
-        # print time it takes to take step in env (A* planning)
-        start_time = time.time()
-        new_start, new_goals = env.step(priorities)
-        logger.print("Time to env.step:", time.time()-start_time)
-        if new_start is not None:
-            throughput.append(env.goal_reached)
-            break
-        logger.print("Priorities not feasible, resampling\n")
-    # problem instance unresolvable
-    if tries == MAX_TRIES:
-        logger.print(f"Priorities not feasible after {MAX_TRIES} tries")
-        # try using PBS
-        logger.print(f"running PBS...")
-        logger.print(env.starts, env.goals)
+    if random.random() < pbs_epsilon:
+        # use PBS to sample priorities
         result = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size)
         if result == "No Solution":
             logger.print("No solution found using PBS, skipping instance\n")
             env.reset()
             new_start, new_goals = env.starts, env.goals
             return None, None, None, None, None, throughput
-
         else:
             plan, priority_order = result
 
@@ -430,7 +395,114 @@ def step(env, logger, throughput, q_vals, policy="random"):
                 partial_prio[(agent, neighbor)] = torch.tensor([action])
                 pred_value[(agent, neighbor)] = q_vals[0][i][action]
                 
-            logger.print("Solution found using PBS\n")
+            logger.print(f"Solution found using PBS with PBS_epsilon: {pbs_epsilon:.2}\n")
+
+    else:
+        # run the sampling process with PBS as a fallback
+        tries = 0
+        MAX_TRIES = 100
+        while tries < MAX_TRIES:
+            tries += 1
+            priorities, partial_prio, pred_value = sample_priorities(env, logger, close_pairs, q_vals[0], policy=policy, epsilon=epsilon)
+            
+            # cycle unresolvable
+            if priorities is None:
+                logger.print("Cycle unresolved, skipping instance\n")
+                env.reset()
+                new_start, new_goals = env.starts, env.goals
+                return None, None, None, None, None, throughput
+
+            # print time it takes to take step in env (A* planning)
+            start_time = time.time()
+            new_start, new_goals = env.step(priorities)
+            logger.print("Time to env.step:", time.time()-start_time)
+            if new_start is not None:
+                throughput.append(env.goal_reached)
+                break
+
+            if USE_PENALTY:
+                # if priorities are not feasible, save samples and give negative reward
+                # 1. step per group, and get delay of group
+                # 2. insert to buffer
+                groups = env.connected_edge_groups()
+                local_rewards = []
+                group_agents = []
+
+                for group in groups:
+                    set_s = set()
+                    for pair in group:
+                        set_s.update(pair)
+                    group_agents.append(list(set_s))
+                    
+                for group in group_agents:
+                    prio = []
+                    for a in priorities:
+                        if a in group:
+                            prio.append(a)
+
+                    delays = env.step_per_group(prio)
+                    if delays is None:
+                        # local delay is -10
+                        logger.print(f"group {group} failed")
+                        local_rewards.append(-10)
+                    else:
+                        # local delay is average
+                        local_rewards.append(10 * sum([-delays[agent] for agent in group]) / len(group))
+
+                # save to buffer
+                buffer.insert(obs_fovs, partial_prio, -1, local_rewards, groups, old_start, old_goals)
+
+            logger.print(f"buffer length in function step: {len(buffer)}")
+
+            logger.print("Priorities not feasible, resampling\n")
+            
+        # problem instance unresolvable
+        if tries == MAX_TRIES:
+            logger.print(f"Priorities not feasible after {MAX_TRIES} tries")
+            # try using PBS
+            logger.print(f"running PBS...")
+            logger.print(env.starts, env.goals)
+            result = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size)
+            if result == "No Solution":
+                logger.print("No solution found using PBS, skipping instance\n")
+                env.reset()
+                new_start, new_goals = env.starts, env.goals
+                return None, None, None, None, None, throughput
+
+            else:
+                plan, priority_order = result
+
+                paths = plan.values()
+                for i, path in enumerate(paths):
+                    print(f"Agent {i}: {path}")
+
+                graph = defaultdict(list)
+                for agent in range(env.num_agents):
+                    graph[agent] = []
+                for a, b in priority_order:
+                    graph[a].append(b)
+                priorities = topological_sort_pbs(graph)
+
+                print(priorities)
+                start_time = time.time()
+                new_start, new_goals = env.step(priorities)
+                logger.print("Time to env.step:", time.time()-start_time)
+
+                # assert new_start is not None
+                if new_start is None:
+                    logger.print("PBS and PP does not match, skipping instance\n")
+                    env.reset()
+                    new_start, new_goals = env.starts, env.goals
+                    return None, None, None, None, None, throughput
+
+                partial_prio = dict()
+                pred_value = dict()
+                for i, (agent, neighbor) in enumerate(close_pairs):
+                    action = int(priorities.index(agent) > priorities.index(neighbor))
+                    partial_prio[(agent, neighbor)] = torch.tensor([action])
+                    pred_value[(agent, neighbor)] = q_vals[0][i][action]
+                    
+                logger.print("Solution found using PBS\n")
 
     return priorities, partial_prio, pred_value, new_start, new_goals, throughput
 
@@ -641,11 +713,15 @@ def update_plan(node, agent_id, grid, starts, goals, window_size):
 def topological_sort_pbs(graph):
     """Topological sort on a directed graph."""
     in_degree = {node: 0 for node in graph}
+
+    random_order = list(graph.keys())
+    random.shuffle(random_order)
+
     for node in graph:
         for neighbor in graph[node]:
             in_degree[neighbor] += 1
 
-    zero_in_degree = deque([node for node in graph if in_degree[node] == 0])
+    zero_in_degree = deque([node for node in random_order if in_degree[node] == 0])
     sorted_order = []
 
     while zero_in_degree:
@@ -824,4 +900,5 @@ def generate_warehouse(rows, cols, num_agents, num_goals, seed=None):
         goal_locs = np.concatenate((goal_locs, new_shelves[:, None, :]), axis=1)
 
     return warehouse, start_locs, goal_locs
+
 
