@@ -17,6 +17,10 @@ warehouse_0:
     BUFFER_SIZE: 30000
     TRAIN_STEPS: 1e10
 
+    DEVICE: "cpu"
+    USE_PBS: False
+    USE_CURRICULUM: False
+
   paths:
     results: "warehouse_0_debug/"
     map_file: "maps/warehouse_0/grid_map.npy"
@@ -38,9 +42,13 @@ warehouse_2:
     N_ACTIONS: 2
 
     BATCH_SIZE: 64
-    LR: 1e-4
+    LR: 1e-3
     BUFFER_SIZE: 30000
     TRAIN_STEPS: 1e10
+
+    DEVICE: "cuda:3"
+    USE_PBS: False
+    USE_CURRICULUM: True
 
   paths:
     results: "warehouse_2_nopenalty/"

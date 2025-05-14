@@ -24,16 +24,10 @@ from ReplayBuffer import ReplayBuffer, PrioritizedReplayBuffer
 from Trainer import Trainer            # Trainer class for Q-networks / Qjoint networks
 from Model import Encoder
 
-USE_GPU = False
-if USE_GPU:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-else:
-    device = torch.device("cpu")
-
 # Set global numpy seed for reproducibility
 np.random.seed(0)
 
-config_name = "warehouse_0"
+config_name = "warehouse_2"
 
 # Load configuration file
 file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -54,6 +48,11 @@ LR             = float(train_config["LR"])
 BUFFER_SIZE    = train_config["BUFFER_SIZE"]
 TRAIN_STEPS    = int(float(train_config["TRAIN_STEPS"]))  # Convert to int for loops
 N_ACTIONS      = train_config["N_ACTIONS"]
+DEVICE         = train_config["DEVICE"]
+device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
+
+USE_PBS = train_config["USE_PBS"]
+USE_CURRICULUM = train_config["USE_CURRICULUM"]
 
 # Paths Configuration
 paths_config      = config["paths"]
@@ -74,20 +73,15 @@ os.makedirs(log_path)
 # Use QTRAN alternative version flag
 is_QTRAN_alt = True
 
+is_logged = {
+    "Q-vals": False,
+    "difference": False,
+}
+
 # %% LOGGER & ENVIRONMENT INITIALIZATION
 logger = Logger(os.path.join(log_path, "log.txt"))
-
 logger.print('[torch] using', device)
 
-env = Environment(env_config,
-                  logger=logger,
-                  grid_map_file=GRID_MAP_FILE,
-                  heuristic_map_file=HEURISTIC_MAP_FILE,
-                  start_loc_options=None,
-                  goal_loc_options=None)
-
-trainer = Trainer(LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env)
-# You can choose either a regular ReplayBuffer or PrioritizedReplayBuffer
 buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE, freeze=False)
 # buffer = ReplayBuffer(buffer_size=BUFFER_SIZE)
 
@@ -199,68 +193,66 @@ def unpack_buffer(buffer, encoder, max_episodes=600, rare_thresh=-0.6):
     return torch.cat(latent), np.array(domain), np.array(rarity)
 
 # %% MAIN TRAINING LOOP
+
+# --------------------------------------------------------------------- #
+#  helpers
+# --------------------------------------------------------------------- #
+def anneal(val0: float, step: int, k: float, floor: float = .1) -> float:
+    """generic 1/(1+k·t) decay"""
+    return max(val0 / (1 + k * step), floor)
+
+def make_env(num_agents: int) -> Environment:
+    env_cfg = {**env_config, "NUM_AGENTS": num_agents}
+    return Environment(env_cfg, logger=logger, grid_map_file=GRID_MAP_FILE, heuristic_map_file=HEURISTIC_MAP_FILE)
+
+# --------------------------------------------------------------------- #
+#  MAIN LOOP
+# --------------------------------------------------------------------- #
+env          = make_env(env_config["NUM_AGENTS"])
+trainer      = Trainer(LR, BATCH_SIZE, is_QTRAN_alt, LAMBDA, env, device).to(device)
+
+steps        = 0
+pbs_steps    = 0
+curriculum_loss  : list[float] = []
+
 new_start, new_goals = env.starts, env.goals
-steps = 0
-curriculum_loss = []
-epsilon_start = 0
+epsilon_start = 0.8
 PBS_epsilon_start = 0
+pbs_epsilon = 0
 decay_rate = 1e-3
-pbs_steps = 0
-
-USE_PBS = False
-USE_CURRICULUM = False
-
-# Sanity check for dropout
-# x = torch.randn(8,7,11,11)     # fake FoV batch
-# coords = torch.randn(8,2)
-# enc = Encoder()
-# enc.train()
-# out1 = enc(x, coords)
-# enc.eval()
-# out2 = enc(x, coords)
-# assert not torch.allclose(out1, out2)  # dropout active vs. inactive
 
 while steps < TRAIN_STEPS:
-    epsilon = max(epsilon_start / (1 + decay_rate * steps), 0.1)
+    # ---------- curriculum -------------------------------------------------
+    if (USE_CURRICULUM and len(curriculum_loss) > 1000 and np.mean(curriculum_loss[-100:]) < 3):
+        torch.save(trainer.q_net.state_dict(), f"{saved_model_path}/q_{steps}.pth")
+        env = make_env(env.num_agents + 2).to(device)
+        # trainer.rebind_env(env)
+        trainer.env = copy.deepcopy(env)
+        trainer.num_agents = env.num_agents
+        curriculum_loss.clear()
+        pbs_steps = 0
+        logger.print(f"Moving on to {env_config['NUM_AGENTS']} agents", "\n")
 
-    if USE_PBS:
-        pbs_epsilon = max(PBS_epsilon_start / (1 + decay_rate * pbs_steps), 0.1)
-    else:
-        pbs_epsilon = 0
 
-    pbs_steps += 1
-
-    if USE_CURRICULUM:
-        # Curriculum learning: increase number of agents if recent loss is small
-        if len(curriculum_loss) > 1000 and np.mean(curriculum_loss[-100:]) < 3:
-            pbs_steps = 0
-            curriculum_loss = []
-            torch.save(trainer.q_net.state_dict(), os.path.join(saved_model_path, f"q_net_{steps}.pth"))
-            env_config["NUM_AGENTS"] = env.num_agents + 2
-            logger.print(f"Moving on to {env_config['NUM_AGENTS']} agents", "\n")
-
-            env = Environment(env_config,
-                            logger=logger,
-                            grid_map_file=GRID_MAP_FILE,
-                            heuristic_map_file=HEURISTIC_MAP_FILE,
-                            start_loc_options=None,
-                            goal_loc_options=None)
-            trainer.env = copy.deepcopy(env)
-            trainer.num_agents = env.num_agents
-
+    # ---------- episode set-up --------------------------------------------
     steps += 1
+    epsilon     = anneal(epsilon_start, steps, decay_rate)
+    if USE_PBS:
+        pbs_epsilon = anneal(PBS_epsilon_start, pbs_steps, decay_rate) if USE_PBS else 0
+    pbs_steps  += 1
+
     timestep_start = time.time()
     logger.print("Step", steps, "\n")
 
     ############################# GET OBSERVATION ####################################
     
-    if OVERFIT_TEST != 0:
+    if OVERFIT_TEST:
         new_start, new_goals = copy.deepcopy(FIXED_START), copy.deepcopy(FIXED_GOALS)
         env.starts, env.goals = new_start, new_goals
         env.DHC_heur = env._get_DHC_heur()
 
     old_start, old_goals = copy.deepcopy(new_start), copy.deepcopy(new_goals)
-    obs_fovs = env.get_obs()
+    obs_fovs = env.get_obs().to(device)
     close_pairs = env.get_close_pairs()
 
     if close_pairs == []:
@@ -270,58 +262,62 @@ while steps < TRAIN_STEPS:
 
     groups = env.connected_edge_groups()
 
+    # ---------- inference (no grad) ---------------------------------------
     with torch.no_grad():
-        trainer.q_net.eval()
-        trainer.qjoint_net.eval()
-        ######################### INDIVIDUAL Q-VALUES ####################################
-        pair_enc, q_vals = trainer.q_net(obs_fovs.to(device).unsqueeze(0), [close_pairs])
+        trainer.eval_mode()
+
+        # ---- individual Q-values --------------------------------------
+
+        pair_enc, q_vals = trainer.q_net(obs_fovs.unsqueeze(0), [close_pairs])
         assert q_vals[0].shape == (len(close_pairs), 2)
 
-        logger.print("Q_vals:")
-        for pair, qval in zip(close_pairs, q_vals[0]):
-            logger.print(pair, np.round(qval.detach().cpu().numpy().squeeze(), 3))
-        logger.print()
+        if is_logged["Q-vals"]:
+            logger.print("Q-vals:")
+            for pair, qval in zip(close_pairs, q_vals[0]):
+                logger.print(pair, np.round(qval.detach().cpu().squeeze().numpy(), 3))
+            logger.print()
 
         ######################### ENV STEP ###############################################
+        #  take environment step with ε-greedy / PBS policy
+        priorities, partial_prio, *_ = step(
+            env, logger, throughput, [qval.cpu() for qval in q_vals],
+            "epsilon_greedy", epsilon, pbs_epsilon,
+            obs_fovs, buffer, old_start, old_goals)
 
-        priorities, partial_prio, pred_value, new_start, new_goals, throughput = step(env, logger, throughput, q_vals, policy="random", epsilon=epsilon, pbs_epsilon=pbs_epsilon, obs_fovs=obs_fovs, buffer=buffer, old_start=old_start, old_goals=old_goals)
-
-        logger.print(f"buffer length: {len(buffer)}")
-        
-        if priorities is None:
+        if priorities is None:      # infeasible → new episode
             env.reset()
             new_start, new_goals = env.starts, env.goals
             continue
 
+        ################################ INSERT (s, a, r) TO BUFFER ########w############################
 
-        ################################ INSERT (s, a, r) TO BUFFER ####################################
-
-        max_delay = 6
-        global_reward = sum([-x for x in env.get_delays()])
-        # global_reward = 1 / (sum(env.get_delays()) + 1)
-
-        local_rewards = []
-        group_agents = []
         delays = env.get_delays()
+        global_reward = -sum(delays)
+
+        group_agents = []
         for group in groups:
             set_s = set()
             for pair in group:
                 set_s.update(pair)
             group_agents.append(list(set_s))
-        for group in group_agents:
-            # sum of reward
-            # local_rewards.append(sum([-delays[agent] for agent in group]))
-            # average reward
-            local_rewards.append(10 * (sum([-delays[agent] for agent in group]) / len(group)) - 0.2)
-            # local_rewards.append(env.num_agents * sum([-delays[agent] for agent in group]) / len(group))
-            # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
-            # local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
 
-        # --- 20 % of new samples go into the (frozen) dev set -------------
+        local_rewards = [10 * (sum([-delays[agent] for agent in group]) / len(group)) - 0.2 for group in group_agents] # 10 *ave reward
+        # local_rewards.append(sum([-delays[agent] for agent in group]))
+        # local_rewards.append(env.num_agents * sum([-delays[agent] for agent in group]) / len(group))
+        # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
+        # local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
+
+        # --- 20 % of new samples go into the (frozen) dev set (store per-group) -------------
         if np.random.rand() < 0.20:
-            dev_buffer.add((obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals))
+            # dev_buffer.add((obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals))
+            for group, local_reward in zip(groups, local_rewards):
+                group_partial_prio = {pair: partial_prio[pair] for pair in group}
+                dev_buffer.add((obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals))
         else:
-            buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals)
+            for group, local_reward in zip(groups, local_rewards):
+                group_partial_prio = {pair: partial_prio[pair] for pair in group}
+                buffer.insert(obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals)
+            # buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals)
 
         logger.print("Priority ordering:", priorities, "\n")
         logger.print("Time to solve instance:", time.time()-timestep_start, "\n")
@@ -391,17 +387,16 @@ while steps < TRAIN_STEPS:
                 logger.print([round(j, 3) for j in i])
 
             # print Q'jt - Qjt
-            logger.print("Q'jt - Qjt:")
-            for i, group_q in enumerate(selected_Qs):
-                logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
+            if is_logged["difference"]:
+                logger.print("Q'jt - Qjt:")
+                for i, group_q in enumerate(selected_Qs):
+                    logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
             logger.print()
         else:
             logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
-
-            # print Q'jt - Qjt
             logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
 
-        logger.print("Global Reward:", global_reward, "\n")
+        logger.print("Global Reward:", global_reward)
         if len(groups) > 1:
             logger.print("Multiple groups detected")
         logger.print("Groups:", group_agents)
@@ -418,6 +413,7 @@ while steps < TRAIN_STEPS:
         plt.plot(ltds, label="LTD", color='red')
         plt.plot(lopts, label="LOPT", color='green')
         plt.plot(lnopts, label="LNOPT", color='blue')
+        plt.yscale('log')
         plt.xlabel("Steps")
         plt.ylabel("Loss")
         plt.legend()
@@ -444,7 +440,6 @@ while steps < TRAIN_STEPS:
         trainer.qjoint_net.train()
         loss, ltd, lopt, lnopt, td_errors = trainer.optimize(batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, logger=logger, weights=weights)
         logger.print("training in", next(trainer.q_net.parameters()).device)      # should print 'cuda:0'
-        
 
         if is_QTRAN_alt:
             logger.print("Loss:", loss, "LTD:", ltd,
@@ -462,8 +457,6 @@ while steps < TRAIN_STEPS:
         if is_prioritized:
             assert len(indices) == len(td_errors), f"Length of indices {len(indices)} and td_errors {len(td_errors)} do not match"
             buffer.update_priorities(indices, td_errors)
-
-        # exit()
 
     if len(dev_buffer) >= BATCH_SIZE and steps % 250 == 0:
         with torch.no_grad():

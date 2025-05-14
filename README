@@ -261,4 +261,89 @@ the Qjt doesnt converge like before. could be because i
 GOAL: get the model to converge again
 TODO now:
 - work on the model, get it close to before, at the same time make it efficient (remove python for loops, etc.)
-- 
+
+1. train again for long time
+- warehouse_2
+- epsilon_greedy
+- tmux train to warehouse_2_nopenalty
+
+2. is the model still too weak? train with over complex model to see if thats the problem
+- tmux train_bigmodel to warehouse_2_bigmodel
+
+# 13 MAY 2025
+1. train again for long time
+- warehouse_2
+- epsilon_greedy
+- tmux train to warehouse_2_nopenalty
+- Loss: 40.242 LTD: 1.826 LOPT: 34.87 LNOPT-min: 41.962
+- 16K steps, loss doesnt converge
+- Qjt not predicting accurately
+
+2. is the model still too weak? train with over complex model to see if thats the problem
+- tmux train_bigmodel to warehouse_2_bigmodel
+- 8K steps, loss converge to ~10 but Qjt always predicts around -2
+
+! is the Ltd calculation wrong?
+- test with overfit
+
+3. debug, overfit to see if Ltd is calculated correctly and Qjt can learn, by freezing PER
+- tmux debug to warehouse_2_debug
+= Qjt can learn and converges after 900 steps, takes longer because the loss calculation is group-level. revert back to pair level treating each pair independently so that each pair learns to predict Qjt faster.
+![loss-plot](image.png)
+
+- run again with updated per-pair Ltd calculation
+= seems better, the predicted values in a group are similar meaning they are learning together
+= the -0.2 is inaccurate tho
+![loss-plot](image-1.png)
+
+Ltd loss is correct, but it takes 1K steps for Ltd just to be less than 0.1
+- increase learning rate, use scheduler
+- group calculation wrong?
+[[-3.847, -3.794, -3.855, ..., -3.802, -3.765], [-3.674]] --------------------- [-3.742, -0.2]
+[[-1.149, -1.116, -1.385, -1.1, -1.023, -1.046], [-1.271, -1.058, ..., -1.169, -0.994, -1.356], [-1.215, -1.087, -1.014, -1.052, ..., -0.853, -1.051]] --------------------- [-0.2, -1.45, -0.533]
+[[-1.955, -1.922, -1.99, -2.019, -2.083, -2.03, ..., -1.844, -1.906, -2.0, -2.15, -1.96], [-1.978, -1.971, -1.97, ..., -1.763, -1.642, -2.048, -2.075], [-1.926]] --------------------- [-2.568, -0.2, -0.2]
+
+- increased learning rate from 1e-4 to 1e-3
+= 400 steps for Ltd to be less than 0.1
+![loss-plot](image-2.png)
+
+4. group calculation wrong?, change PER to store groups not episodes
+- overfit again to see if the -0.2 values are predicted correctly.
+- tmux debug to warehouse_2_debug
+= 325 steps, Ltd less that 0.1
+![loss-plot](image-3.png)
+
+5. train Qjt only (non-overfit) warehouse_2
+- no penalty
+- tmux train_Ltd to warehouse_2_LTDonly
+= 8K steps, Ltd converge to less than 0.1
+![loss-plot](image-4.png)
+
+6. train full loss warehouse_2, epsilon greedy
+- tmux train_full to warehouse_2_nopenalty
+= 8K steps, Ltd converge ~2
+= Lopt Lnopt doesnt converge, i think the loss calculation has a problem?
+![loss-plot](image-6.png)
+
+7. train full loss warehouse_2, where Lopt and Lnopt-min is per pair
+- tmux train_full_pair to warehouse_2_nopenalty_pairloss
+= 8K steps, Lopt doesnt converge
+![loss-plot](image-5.png)
+
+
+Lopt, Lnopt-min not converge
+-0.2 prediction not accurate
+
+# 14 MAY 2025
+1. train again to see if the losses converge
+- changes: .mean() over batch, instead of weighted mean over IS weights
+            '''
+            per_pair_w = torch.repeat_interleave(weights_tensor, torch.tensor(num_n_pairs, device=self.device))
+            per_pair_w = per_pair_w / (per_pair_w.max() + 1e-8)
+            ltd = (per_pair_w * ltd_raw).mean()
+            '''
+
+- debugging to see if shapes for loss calculations are correct, tmux debug to warehouse_0_debug
+= wrong shape for lopt, needed to squeeze before multiply with weights
+
+CURRENT: tmux train_full to warehouse_2_nopenalty

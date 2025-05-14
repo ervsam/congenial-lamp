@@ -29,54 +29,26 @@ class Encoder(nn.Module):
         self.layers = 7          # image channels
 
         self.conv = nn.Sequential(
-            nn.Conv2d(self.layers, 32, 3, padding=1), nn.LeakyReLU(),
+            nn.Conv2d(self.layers, 32, 3, padding=1),
+            nn.LeakyReLU(),
             ResBlock(32),                             # <- keep two res-blocks
             ResBlock(32),
-            nn.Dropout2d(p=0.10),                     # not 0.20
-            nn.Conv2d(32, 16, 1),  nn.LeakyReLU(),
+            ResBlock(32),
+            # nn.Dropout2d(p=0.10),                     # not 0.20
+            nn.Conv2d(32, 16, 1), 
+            nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(16*11*11, 64),  nn.LeakyReLU(), # 64-d latent
+            nn.Linear(16*11*11, 64),
+            nn.LeakyReLU(), # 64-d latent
         )
         self.coord_fc = nn.Linear(2, 32)
-        self.out      = nn.Linear(64+32, 64)  
+        self.out      = nn.Linear(64+32, 64)
 
     def forward(self, x, coords):
         h_img   = self.conv(x)
         h_coord = self.coord_fc(coords)
         h       = torch.cat([h_img, h_coord], dim=-1)
         return self.out(h)
-    
-# %% Encoder (old version, not used)
-# class Encoder(nn.Module):
-#     def __init__(self, hid_dim=32):
-#         super(Encoder, self).__init__()
-
-#         self.hid_dim = hid_dim
-#         self.layers = 7
-
-#         self.obs_encoder = nn.Sequential(
-#             nn.Conv2d(self.layers, 32, 3, 1),
-#             nn.LeakyReLU(),
-#             ResBlock(32),
-#             ResBlock(32),
-
-#             nn.Conv2d(32, 16, 1, 1),
-#             nn.LeakyReLU(),
-#             nn.Flatten(),
-#             nn.Linear(1296, self.hid_dim),
-#         )
-
-#         self.encode_coords = nn.Linear(2, 32)
-#         self.output = nn.Linear(self.hid_dim + 32, self.hid_dim)
-
-#     def forward(self, x, coords):
-#         # x: n x 7 x 7 x 7
-#         x = self.obs_encoder(x)
-#         c = self.encode_coords(coords)
-#         x = torch.cat((x, c), dim=1)
-#         x = self.output(x)
-
-#         return x
 
 # %% Q-Network (agent utility network)
 class QNetwork(nn.Module):
@@ -93,7 +65,9 @@ class QNetwork(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(self.hid_dim, self.hid_dim),
             nn.LeakyReLU(),
-            nn.Dropout(p=0.2),
+            nn.Linear(self.hid_dim, self.hid_dim),
+            nn.LeakyReLU(),
+            # nn.Dropout(p=0.2),
             nn.Linear(self.hid_dim, 2),        # 2 actions
         )
 
@@ -184,7 +158,10 @@ class QJoint(nn.Module):
             nn.ELU(),
             nn.Linear(self.hid, self.hid),
             nn.ELU(),
-            nn.Dropout(p=0.2),
+            nn.ELU(),
+            nn.Linear(self.hid, self.hid),
+            nn.ELU(),
+            # nn.Dropout(p=0.2),
             nn.Linear(self.hid, self.hid * 2),
         )
 
@@ -194,7 +171,9 @@ class QJoint(nn.Module):
             nn.ELU(),
             nn.Linear(self.hid, self.hid),
             nn.ELU(),
-            nn.Dropout(p=0.2),
+            nn.Linear(self.hid, self.hid),
+            nn.ELU(),
+            # nn.Dropout(p=0.2),
             nn.Linear(self.hid, 1),
         )
 
@@ -202,40 +181,10 @@ class QJoint(nn.Module):
         self.phi2 = nn.Sequential(
             nn.Linear(self.hid * 2, self.hid),
             nn.ELU(),
+            nn.Linear(self.hid, self.hid),
+            nn.ELU(),
             nn.Linear(self.hid, 2),          # outputs per-pair Q-vector
         )
-
-        # self.rare_head = nn.Linear(self.hid * 2, 1)    # in QJoint.__init__()
-
-
-        # old version
-        self.input_dim = LATENT_DIM * 2 + 2
-        self.hidden_dim = LATENT_DIM
-        # self.linear_0 = nn.Sequential(
-        #     nn.Linear(self.input_dim, self.hidden_dim),
-        #     nn.ReLU(),
-        #     # nn.Linear(self.hidden_dim, self.hidden_dim),
-        #     # nn.ELU(),
-        #     # nn.Linear(self.hidden_dim, self.hidden_dim),
-        #     # nn.ELU(),
-        #     # nn.Linear(self.hidden_dim, self.hidden_dim),
-        #     # nn.ELU(),
-        #     # nn.Linear(self.hidden_dim, self.hidden_dim),
-        #     # nn.ELU(),
-        #     nn.Linear(self.hidden_dim, 64),
-        # )
-        # self.linear = nn.Sequential(
-        #     nn.Linear(64, self.hidden_dim),
-        #     nn.ReLU(),
-        #     # nn.Linear(self.hidden_dim*2, self.hidden_dim),
-        #     # nn.ELU(),
-        #     # nn.Linear(self.hidden_dim, self.hidden_dim),
-        #     # nn.ELU(),
-        #     nn.Linear(self.hidden_dim, 1),
-        # )
-        # self.lin1 = nn.Linear(64, 64)
-        # self.lin2 = nn.Linear(64, 2)
-
 
     def forward(self,
                 flat_pair_enc  : torch.Tensor,           # (ΣP, 2H)  – no actions
@@ -259,22 +208,6 @@ class QJoint(nn.Module):
         key2_per_ep  = torch.split(flat_pair_enc,  n_pairs_list, dim=0)     # B × (P_i, 2H)
 
         out_qjt, out_qjt_alt = [], []
-
-        # OLD (DELETE)
-        # expand
-        # tmp = []
-        # tmp_batch_pair_enc = []
-        # start = 0
-        # for num in n_pairs_list:
-        #     t = batch_pair_enc_action[start:start+num]
-        #     tmp.append(t)
-
-        #     t = batch_pair_enc[start:start+num]
-        #     tmp_batch_pair_enc.append(t)
-
-        #     start += num
-        # batch_pair_enc_action = tmp
-        # key2 = tmp_batch_pair_enc
 
         #### -------------------------------------------------------------- ##
         #### 1.  Per-episode computation (tiny loops; remain on GPU)
@@ -330,69 +263,6 @@ class QJoint(nn.Module):
 
         return out_qjt, out_qjt_alt 
 
-
-        # # OLD (DELETE)
-        # joint_qs_prereduced = []
-
-        # for pair_enc_action, close_pairs, groups in zip(batch_pair_enc_action, batch_close_pairs, batch_groups):
-        #     assert pair_enc_action.shape[1] == self.input_dim, f"Expected {self.input_dim}, got {pair_enc_action.shape[1]}"
-
-        #     key1 = self.phi1(pair_enc_action)
-
-        #     # print("groups:", groups)
-        #     grouped_key1 = []
-        #     for group in groups:
-        #         tmp_grp = []
-        #         for k1, pair in zip(key1, close_pairs):
-        #             if pair in group:
-        #                 tmp_grp.append(k1)
-        #         grouped_key1.append(torch.stack(tmp_grp))
-        #     joint_qs_prereduced += grouped_key1
-
-
-        #     group_jt = []
-        #     for k1 in grouped_key1:
-        #         # mean encoded q_vals
-        #         combined_agents = k1.mean(dim=0) # h
-        #         # old
-        #         # q_jt = self.linear(combined_agents)
-        #         q_jt = self.g(combined_agents)
-
-        #         assert q_jt.shape == (1,), f"Expected {(1,)}, got {q_jt.shape}"
-        #         group_jt.append(q_jt)
-            
-        #     b_qjt.append(torch.stack(group_jt))
-
-        # averaged = []
-        # for q in joint_qs_prereduced:
-        #     # 'n_pairs' x h
-        #     averaged.append(q.mean(dim=0, keepdim=True))
-        # averaged = torch.stack(averaged) # 'group' x 1 x h
-
-        # grouped_key2 = []
-        # for k2s, close_pairs, groups in zip(key2, batch_close_pairs, batch_groups):
-        #     # k2: 'n_pairs' x h
-        #     grouped_k2s = []
-        #     for group in groups:
-        #         tmp_grp = []
-        #         for k2, pair in zip(k2s, close_pairs):
-        #             if pair in group:
-        #                 tmp_grp.append(k2)
-        #         grouped_k2s.append(torch.stack(tmp_grp))
-        #     grouped_key2 += grouped_k2s
-
-        # b_qjt_alt = []
-        # for k2, ave, j in zip(grouped_key2, averaged, joint_qs_prereduced):
-        #     tmp = k2 + ave - j/len(j) # len(j) = 'n_pairs'
-        #     b_qjt_alt.append(tmp)
-        # # b_qjt_alt = key2 + averaged - joint_qs_prereduced/'n_pairs'
-        # tmp = []
-        # for q in b_qjt_alt:
-        #     q = self.phi2(q)
-        #     tmp.append(q)
-        # b_qjt_alt = tmp
-
-        # return b_qjt, b_qjt_alt
 
 # %% Joint V Network
 
