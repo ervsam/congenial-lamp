@@ -74,8 +74,8 @@ os.makedirs(log_path)
 is_QTRAN_alt = True
 
 is_logged = {
-    "Q-vals": False,
-    "difference": False,
+    "Q-vals": True,
+    "difference": True,
 }
 
 # %% LOGGER & ENVIRONMENT INITIALIZATION
@@ -217,28 +217,28 @@ curriculum_loss  : list[float] = []
 
 new_start, new_goals = env.starts, env.goals
 epsilon_start = 0.8
-PBS_epsilon_start = 0
-pbs_epsilon = 0
+PBS_epsilon_start = 0.8
+pbs_epsilon = PBS_epsilon_start
 decay_rate = 1e-3
 
 while steps < TRAIN_STEPS:
     # ---------- curriculum -------------------------------------------------
     if (USE_CURRICULUM and len(curriculum_loss) > 1000 and np.mean(curriculum_loss[-100:]) < 3):
         torch.save(trainer.q_net.state_dict(), f"{saved_model_path}/q_{steps}.pth")
-        env = make_env(env.num_agents + 2).to(device)
+        env = make_env(env.num_agents + 2)
         # trainer.rebind_env(env)
         trainer.env = copy.deepcopy(env)
         trainer.num_agents = env.num_agents
         curriculum_loss.clear()
         pbs_steps = 0
-        logger.print(f"Moving on to {env_config['NUM_AGENTS']} agents", "\n")
+        logger.print(f"Moving on to {env.num_agents} agents", "\n")
 
 
     # ---------- episode set-up --------------------------------------------
     steps += 1
     epsilon     = anneal(epsilon_start, steps, decay_rate)
     if USE_PBS:
-        pbs_epsilon = anneal(PBS_epsilon_start, pbs_steps, decay_rate) if USE_PBS else 0
+        pbs_epsilon = anneal(PBS_epsilon_start, pbs_steps, decay_rate)
     pbs_steps  += 1
 
     timestep_start = time.time()
@@ -274,7 +274,7 @@ while steps < TRAIN_STEPS:
         if is_logged["Q-vals"]:
             logger.print("Q-vals:")
             for pair, qval in zip(close_pairs, q_vals[0]):
-                logger.print(pair, np.round(qval.detach().cpu().squeeze().numpy(), 3))
+                logger.print(pair, np.round(qval.detach().cpu().squeeze().numpy(), 5))
             logger.print()
 
         ######################### ENV STEP ###############################################
@@ -360,12 +360,13 @@ while steps < TRAIN_STEPS:
         batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
 
         ############ if using Q-JOINT ############
+        for group, local_reward in zip(groups, local_rewards):
+                group_partial_prio = {pair: partial_prio[pair] for pair in group}
+                dev_buffer.add((obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals))
+
         q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action.to(device), [close_pairs], [groups], [len(partial_prio)])
 
         if is_QTRAN_alt:
-            # logger.print("Q-joint alt predicted:")
-            # for i in q_jt_alt:
-            #     logger.print(i.detach().numpy())
             group_onehot = []
             for group in groups:
                 subgroup_actions = []
@@ -374,10 +375,6 @@ while steps < TRAIN_STEPS:
                         subgroup_actions.append(act)
                 group_onehot.append(torch.stack(subgroup_actions))
 
-            # logger.print("Group one-hot actions:")
-            # for i in group_onehot:
-            #     logger.print(i.detach().numpy())
-        
             selected_Qs = []
             for q, act in zip(q_jt_alt, group_onehot):
                 selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().cpu().numpy()))

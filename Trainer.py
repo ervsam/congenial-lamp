@@ -26,7 +26,7 @@ class Trainer:
         self.fixed_qjoint_net = QJoint().to(self.device)
         self.vnet = VJoint().to(self.device)
 
-        self.update_every = 10
+        self.update_every = 200
         self.counter = 0
 
         self.lr = LR
@@ -456,7 +456,8 @@ class Trainer:
 
             loss = ltd + self.LAMBDA * lopt + self.LAMBDA * lnopt
 
-            pair_td = (selected_Q - batch_local_rewards).abs().detach()    # (total_pairs,)
+            pair_td = (selected_Q.squeeze() - batch_local_rewards).abs().detach()    # (total_pairs,)
+
             td_errors = []
             cursor = 0
             for n in num_n_pairs:

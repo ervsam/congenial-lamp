@@ -335,7 +335,7 @@ Lopt, Lnopt-min not converge
 -0.2 prediction not accurate
 
 # 14 MAY 2025
-1. train again to see if the losses converge
+>1. train again to see if the losses converge
 - changes: .mean() over batch, instead of weighted mean over IS weights
             '''
             per_pair_w = torch.repeat_interleave(weights_tensor, torch.tensor(num_n_pairs, device=self.device))
@@ -343,7 +343,132 @@ Lopt, Lnopt-min not converge
             ltd = (per_pair_w * ltd_raw).mean()
             '''
 
-- debugging to see if shapes for loss calculations are correct, tmux debug to warehouse_0_debug
+> debugging to see if shapes for loss calculations are correct, tmux debug to warehouse_0_debug
 = wrong shape for lopt, needed to squeeze before multiply with weights
 
-CURRENT: tmux train_full to warehouse_2_nopenalty
+> tmux train_full to warehouse_2_nopenalty
+
+>2. -0.2 delays are not predicted correctly. does this have to do with PER not sampling enough since the group size is small? but new weight is calculated by max of td error
+i can check by running overfit test, each pair should update together
+- doesnt get trained as much? because of the td_error? fix: try deactivate PER by setting the hyperparameter alpha(?) to 1 or something
+- bigger groups have more weight in loss? i dont think so
+= turns out its a shape problem, .squeeze() selected_Q
+pair_td = (selected_Q.squeeze() - batch_local_rewards).abs().detach()    # (total_pairs,)
+
+\\ QTRAN-alt Lnopt-min should min(., 0)? In summary, the implementation should ensure that only negative violations are penalized (e.g. by something like torch.clamp(min_diff, max=0) before squaring).
+
+> line 363 not updated yet to predict per group?
+q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action.to(device), [close_pairs], [groups], [len(partial_prio)])
+it should be fine right?
+__CHANGE__: try train again with fixed td_error calculation for PER
+> tmux train_full_fixed to warehouse_2_debug
+
+3. train using PBS labels
+> tmux train_pbs to warehouse_2_PBS
+
+# 15 MAY 2025
+1. tmux train_full to warehouse_2_nopenalty
+- Step 17400, training at 84 agents, loss looks good
+Loss: 0.249 LTD: 0.126 LOPT: 0.085 LNOPT-min: 0.162
+![loss-plot](image-7.png)
+
+> prediction of multiple groups not correct
+    Q-joint chosen:
+    [-6.128, -6.087, ..., 0.502, -6.072, -6.108]
+    [-6.136, -6.075, -6.041]
+    Local Rewards: [-6.867, -0.2] 
+
+    Q-joint chosen:
+    [-5.429, -5.486, ..., -5.483, -5.36, -5.614]
+    [-5.912, -5.455, -5.449]
+    Local Rewards: [-6.253, -3.533] 
+
+    Q-joint chosen:
+    [0.534]
+    [-3.658, -3.692, -3.672, ..., -3.682, -3.667]
+    Local Rewards: [-0.2, -4.944] 
+
+2. tmux train_full_fixed to warehouse_2_debug
+![loss-plot](image-8.png)
+- prediction of multiple groups also not correct
+- Ltd less than 1, predictions of Qjt pretty accurate
+
+\\ Step 13833, Q-vals predicted not useful?
+Q-vals:
+(0, 4) [-0.01 -0.01]
+(0, 5) [-0.01  -0.009]
+(0, 6) [-0.01  -0.009]
+(0, 16) [-0.011 -0.009]
+(0, 20) [-0.01  -0.009]
+(0, 24) [-0.01  -0.009]
+(0, 31) [-0.01  -0.009]
+(0, 33) [-0.01  -0.009]
+(0, 38) [-0.01  -0.009]
+(0, 45) [-0.01  -0.009]
+
+3. tmux train_pbs to warehouse_2_PBS
+- also has multiple group prediction problem
+- i dont think its just a bad prediction of -0.2 because the pred values are close to the other group, for ex:
+Q-joint chosen:
+[-2.331, -2.249, ..., -2.327, -4.628]
+[-2.273, ..., -2.364]
+Local Rewards: [-1.386, -0.2] 
+
+Q-joint chosen:
+[-1.612, -1.576, ..., -3.329]
+[-1.537]
+Local Rewards: [-1.006, -0.2] 
+- so i think there is a bug in the inference
+
+= 10K steps, Ltd and Qjt preds look fine
+Loss: 0.156 LTD: 0.129 LOPT: 0.026 LNOPT-min: 0.028
+
+= also no clear useful values from Q-vals
+Q-vals:
+(0, 14) [0.004 0.005]
+(0, 16) [0.004 0.004]
+(0, 17) [0.004 0.004]
+(0, 20) [0.004 0.004]
+(0, 21) [0.003 0.003]
+(0, 24) [0.003 0.003]
+(0, 26) [0.003 0.003]
+(0, 40) [0.004 0.004]
+(0, 53) [0.004 0.004]
+(0, 54) [0.004 0.004]
+(0, 55) [0.004 0.003]
+(0, 57) [0.004 0.004]
+(0, 61) [0.003 0.004]
+(1, 2) [0.002 0.002]
+
+__CHANGE__: set Trainer self.update_every = 10 to 200
+
+> check inference in train.py
+q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action.to(device), [close_pairs], [groups], [len(partial_prio)])
+__CHANGE__: QJoint.forward() is wrong in regrouping the alt_q
+    # OLD (DELETE) - wrong split
+    # # reorganise alt_q into (G_i, n_pairs_in_g, 2) for convenience
+    # splits   = [len(g) for g in groups]
+    # alt_per_g = alt_q.split(splits, dim=0)
+
+    # reorganise alt_q into (G_i, n_pairs_in_g, 2) by explicit group membership
+    # map each pair tuple to its row index
+    alt_per_g = []
+    for group in groups:
+        idxs = [pair2idx[p] for p in group]
+        alt_per_g.append(alt_q[idxs])
+
+
+4. tmux debug to warehouse_2_noPBS
+- fix inference
+__CHANGE__: k1_div_len_g calculated incorrectly, used scatter_mean(torch.ones_like(key1), …) averages a tensor of all 1’s per feature, so it always gives you back 1
+counts = scatter_sum(torch.ones(len(pairs), device=key1.device),
+                     group_index, dim=0)          # → (G_i,)
+# expand counts back to per-pair
+count_per_pair = counts[group_index].unsqueeze(-1) # → (P_i,1)
+k1_div_len_g = key1 / count_per_pair               # → (P_i, D)
+**CURRENT**: tmux debug to warehouse_2_noPBS, then check if the multigroups preds are correct
+
+**CURRENT**: tmux train_pbs to warehouse_2_PBS, with the above fixes
+
+- add penalty again
+- why does QTRAN-alt predict Qjt per agent?

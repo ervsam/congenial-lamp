@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_scatter import scatter_mean
+from torch_scatter import scatter_mean, scatter_sum
 
 LATENT_DIM = 64
 
@@ -234,13 +234,22 @@ class QJoint(nn.Module):
             for g_id, g in enumerate(groups):
                 for p in g:
                     group_index[pair2idx[p]] = g_id
+
             # key1_mean[g] = mean_{p∈g} key1[p]
             key1_mean = scatter_mean(key1, group_index, dim=0)              # (G_i, H)
+
+            # if len(groups) > 1:
+            #     print("groups from Qjoint:", groups)
+            #     print("group_index:", group_index)
+            #     print("key1_mean:", key1_mean)
+            #     print("key1_mean", key1_mean[1])
+            #     print("key1:", key1[pair2idx[groups[1][0]]])
+            #     print("key1_mean == key1:", key1_mean[1] == key1[pair2idx[groups[1][0]]])
+            #     quit()
 
             # scalar Qjt per group   (Eq. 9)
             q_jt = self.g(key1_mean).squeeze(-1)  
 
-            
             # ------------------------------------------------------------------ #
             # 1-c  Alternative head  (Eq. 10   k₂ + k̄₁ − k₁/|g|)
             # ------------------------------------------------------------------ #
@@ -248,18 +257,42 @@ class QJoint(nn.Module):
             #   k₂[p],   mean_key1_of_group[p],   key1[p]/|g|
             #
             k2            = key2                                             # (P_i, 2H)
-            k1_div_len_g  = key1 / scatter_mean(torch.ones_like(key1),
-                                                group_index, dim=0)[group_index]  # (P_i,H)
+
+            # OLD (DELETE) - wrong calculation of k1/|g|
+            # k1_div_len_g  = key1 / scatter_mean(torch.ones_like(key1),
+            #                                     group_index, dim=0)[group_index]  # (P_i,H)
+            
+            counts = scatter_sum(torch.ones(len(pairs), device=key1.device),
+                                group_index, dim=0)          # → (G_i,)
+            # expand counts back to per-pair
+            count_per_pair = counts[group_index].unsqueeze(-1) # → (P_i,1)
+            k1_div_len_g = key1 / count_per_pair               # → (P_i, D)
+
+            # print("counts", counts)
+            # print("count_per_pair", count_per_pair[0])            
+            # print("k1_div_len_g", k1_div_len_g[0])
+            # print("key1", key1[0])
+            # quit()
 
             kbar1         = key1_mean[group_index]                           # (P_i, H)
             alt_val       = k2 + kbar1 - k1_div_len_g                        # (P_i,2H)  (2H if φ₂ expects that)
             alt_q         = self.phi2(alt_val)                               # (P_i, 2)
 
-            # reorganise alt_q into (G_i, n_pairs_in_g, 2) for convenience
-            splits   = [len(g) for g in groups]
-            alt_per_g = alt_q.split(splits, dim=0)
+            # OLD (DELETE) - wrong split
+            # # reorganise alt_q into (G_i, n_pairs_in_g, 2) for convenience
+            # splits   = [len(g) for g in groups]
+            # alt_per_g = alt_q.split(splits, dim=0)
+            
+            # reorganise alt_q into (G_i, n_pairs_in_g, 2) by explicit group membership
+            # map each pair tuple to its row index
+            alt_per_g = []
+            for group in groups:
+                idxs = [pair2idx[p] for p in group]
+                alt_per_g.append(alt_q[idxs])
+
             out_qjt.append(q_jt.unsqueeze(-1))        # keep shape (G_i,1) to match old code
             out_qjt_alt += alt_per_g
+            # out_qjt_alt.append(alt_per_g)
 
         return out_qjt, out_qjt_alt 
 
