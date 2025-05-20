@@ -22,7 +22,7 @@ warehouse_0:
     USE_CURRICULUM: False
 
   paths:
-    results: "warehouse_0_debug/"
+    results: "warehouse_0_a/"
     map_file: "maps/warehouse_0/grid_map.npy"
     heur_file: "maps/warehouse_0/heuristic.npy"
     goals_locs: "maps/warehouse_0/goal_options.npy"
@@ -32,7 +32,7 @@ warehouse_2:
   root: "results/"
 
   environment:
-    NUM_AGENTS: 50
+    NUM_AGENTS: 70
     FOV: 11
     WINDOW_SIZE: 5
   
@@ -46,12 +46,12 @@ warehouse_2:
     BUFFER_SIZE: 30000
     TRAIN_STEPS: 1e10
 
-    DEVICE: "cuda:2"
-    USE_PBS: False
-    USE_CURRICULUM: True
+    DEVICE: "cuda:4"
+    USE_PBS: True
+    USE_CURRICULUM: False
 
   paths:
-    results: "warehouse_2_noPBS/"
+    results: "warehouse_2_debug/"
     map_file: "maps/warehouse_2/grid_map.npy"
     heur_file: "maps/warehouse_2/heuristic.npy"
     goals_locs: "maps/warehouse_2/goal_options.npy"

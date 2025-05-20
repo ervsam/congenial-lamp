@@ -528,6 +528,9 @@ class Trainer:
         self.optimizer.step()
         # step the scheduler to update the learning rate
         self.scheduler.step()
+        # print current learning rate
+        current_lrs = self.scheduler.get_last_lr()
+        logger.print(f"Current LR: {current_lrs}")
 
         self.counter += 1
         # update fixed_qjoint_net

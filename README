@@ -393,7 +393,7 @@ Loss: 0.249 LTD: 0.126 LOPT: 0.085 LNOPT-min: 0.162
 - prediction of multiple groups also not correct
 - Ltd less than 1, predictions of Qjt pretty accurate
 
-\\ Step 13833, Q-vals predicted not useful?
+> Step 13833, Q-vals predicted not useful?
 Q-vals:
 (0, 4) [-0.01 -0.01]
 (0, 5) [-0.01  -0.009]
@@ -470,5 +470,28 @@ k1_div_len_g = key1 / count_per_pair               # → (P_i, D)
 
 **CURRENT**: tmux train_pbs to warehouse_2_PBS, with the above fixes
 
+> tmux results_qtrannopbs to qtran 60-90 using q_net_15102.pth
+> tmux results_qtranpbs to qtran_pbs 60-90 using q_net_15096.pth
+not better than random PP
+
+# 16 MAY 2025
+
+**CURRENT**: tmux train_sumrewardnormalized to warehouse_2_sumdelaynormalized
+
+- learning rate? print
+- remove -0.2 in reward
+
 - add penalty again
+- try use negative sum of delay as the reward
+- try train for N (ex. 80) agents only and test instead of using curr learning
+
+- test on a very small map
+
 - why does QTRAN-alt predict Qjt per agent?
+
+# 17 MAY 2025
+
+> my_module.py _get_fov was not updated yet to pad constant value of 0. check for other mistakes
+
+# 20 MAY 2025
+

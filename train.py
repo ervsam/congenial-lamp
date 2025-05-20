@@ -27,7 +27,7 @@ from Model import Encoder
 # Set global numpy seed for reproducibility
 np.random.seed(0)
 
-config_name = "warehouse_2"
+config_name = "warehouse_0"
 
 # Load configuration file
 file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -224,7 +224,7 @@ decay_rate = 1e-3
 while steps < TRAIN_STEPS:
     # ---------- curriculum -------------------------------------------------
     if (USE_CURRICULUM and len(curriculum_loss) > 1000 and np.mean(curriculum_loss[-100:]) < 3):
-        torch.save(trainer.q_net.state_dict(), f"{saved_model_path}/q_{steps}.pth")
+        torch.save(trainer.q_net.state_dict(), f"{saved_model_path}/q_net_{steps}.pth")
         env = make_env(env.num_agents + 2)
         # trainer.rebind_env(env)
         trainer.env = copy.deepcopy(env)
@@ -301,8 +301,9 @@ while steps < TRAIN_STEPS:
                 set_s.update(pair)
             group_agents.append(list(set_s))
 
-        local_rewards = [10 * (sum([-delays[agent] for agent in group]) / len(group)) - 0.2 for group in group_agents] # 10 *ave reward
-        # local_rewards.append(sum([-delays[agent] for agent in group]))
+        # local_rewards = [10 * (sum([-delays[agent] for agent in group]) / len(group)) - 0.2 for group in group_agents] # 10 * ave delays
+        # local_rewards = [(sum([-delays[agent] for agent in group])) for group in group_agents] # sum of delays
+        local_rewards = [(sum([-delays[agent] for agent in group]) / 10) for group in group_agents] # sum of delays normalized
         # local_rewards.append(env.num_agents * sum([-delays[agent] for agent in group]) / len(group))
         # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
         # local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
@@ -360,20 +361,19 @@ while steps < TRAIN_STEPS:
         batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
 
         ############ if using Q-JOINT ############
-        for group, local_reward in zip(groups, local_rewards):
-                group_partial_prio = {pair: partial_prio[pair] for pair in group}
-                dev_buffer.add((obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals))
-
         q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action.to(device), [close_pairs], [groups], [len(partial_prio)])
 
         if is_QTRAN_alt:
-            group_onehot = []
-            for group in groups:
-                subgroup_actions = []
-                for pair, act in zip(close_pairs, batch_onehot_actions):
-                    if pair in group:
-                        subgroup_actions.append(act)
-                group_onehot.append(torch.stack(subgroup_actions))
+            # vectorized group_onehot construction
+            # map each pair to its index in close_pairs
+            pair2idx = {pair: idx for idx, pair in enumerate(close_pairs)}
+            # build a tensor of indices for each group
+            group_idxs = [
+                torch.tensor([pair2idx[p] for p in group], dtype=torch.long, device=batch_onehot_actions.device)
+                for group in groups
+            ]
+            # gather one-hot actions per group using advanced indexing
+            group_onehot = [batch_onehot_actions[idxs] for idxs in group_idxs]
 
             selected_Qs = []
             for q, act in zip(q_jt_alt, group_onehot):
@@ -385,9 +385,9 @@ while steps < TRAIN_STEPS:
 
             # print Q'jt - Qjt
             if is_logged["difference"]:
-                logger.print("Q'jt - Qjt:")
-                for i, group_q in enumerate(selected_Qs):
-                    logger.print([round(q_prime[i].item() - j, 3) for j in group_q])
+                logger.print("Q'jt + Vtot - Qjt:")
+                for i, group_qjt in enumerate(selected_Qs):
+                    logger.print([round(q_prime[i].item() + vtot[i].item() - j, 3) for j in group_qjt])
             logger.print()
         else:
             logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
