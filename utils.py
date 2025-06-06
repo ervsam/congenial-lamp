@@ -361,7 +361,7 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
             logger.print("No solution found using PBS, skipping instance\n")
             env.reset()
             new_start, new_goals = env.starts, env.goals
-            return None, None, None, None, None, throughput
+            return None, None, None, new_start, new_goals, throughput
         else:
             plan, priority_order = result
             paths = plan.values()
@@ -385,7 +385,7 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
                 logger.print("PBS and PP does not match, skipping instance\n")
                 env.reset()
                 new_start, new_goals = env.starts, env.goals
-                return None, None, None, None, None, throughput
+                return None, None, None, new_start, new_goals, throughput
 
             partial_prio = dict()
             pred_value = dict()
@@ -409,7 +409,7 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
                 logger.print("Cycle unresolved, skipping instance\n")
                 env.reset()
                 new_start, new_goals = env.starts, env.goals
-                return None, None, None, None, None, throughput
+                return None, None, None, new_start, new_goals, throughput
 
             # print time it takes to take step in env (A* planning)
             start_time = time.time()
@@ -462,7 +462,7 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
                 logger.print("No solution found using PBS, skipping instance\n")
                 env.reset()
                 new_start, new_goals = env.starts, env.goals
-                return None, None, None, None, None, throughput
+                return None, None, None, new_start, new_goals, throughput
 
             else:
                 plan, priority_order = result
@@ -488,7 +488,7 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
                     logger.print("PBS and PP does not match, skipping instance\n")
                     env.reset()
                     new_start, new_goals = env.starts, env.goals
-                    return None, None, None, None, None, throughput
+                    return None, None, None, new_start, new_goals, throughput
 
                 partial_prio = dict()
                 pred_value = dict()

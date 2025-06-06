@@ -78,7 +78,7 @@ class QNetwork(nn.Module):
             nn.Linear(self.hid_dim, self.hid_dim),
             nn.LeakyReLU(),
             # nn.Dropout(p=0.2),
-            nn.Linear(self.hid_dim, 2),        # 2 actions
+            nn.Linear(self.hid_dim, 3),        # 2 actions
         )
 
         # New: Neighbor attention module (can use MultiheadAttention)
