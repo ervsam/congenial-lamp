@@ -285,6 +285,8 @@ for i in range(old_len, N_SAMPLES):
         old_start=old_start, old_goals=old_goals, neighbor_features=neighbor_features
     )
 
+    plan, priority_order = priority_based_search(env.grid_map, old_start, old_goals, env.window_size)
+
     # step() returns None if PBS fails; skip if so
     if priorities is None or partial_prio is None:
         old_start = new_start
