@@ -466,9 +466,10 @@ counts = scatter_sum(torch.ones(len(pairs), device=key1.device),
 # expand counts back to per-pair
 count_per_pair = counts[group_index].unsqueeze(-1) # → (P_i,1)
 k1_div_len_g = key1 / count_per_pair               # → (P_i, D)
-**CURRENT**: tmux debug to warehouse_2_noPBS, then check if the multigroups preds are correct
+> tmux debug to warehouse_2_noPBS
+> then check if the multigroups preds are correct
 
-**CURRENT**: tmux train_pbs to warehouse_2_PBS, with the above fixes
+> tmux train_pbs to warehouse_2_PBS, with the above fixes
 
 > tmux results_qtrannopbs to qtran 60-90 using q_net_15102.pth
 > tmux results_qtranpbs to qtran_pbs 60-90 using q_net_15096.pth
@@ -476,7 +477,7 @@ not better than random PP
 
 # 16 MAY 2025
 
-**CURRENT**: tmux train_sumrewardnormalized to warehouse_2_sumdelaynormalized
+> tmux train_sumrewardnormalized to warehouse_2_sumdelaynormalized
 
 - learning rate? print
 - remove -0.2 in reward
@@ -488,10 +489,126 @@ not better than random PP
 - test on a very small map
 
 - why does QTRAN-alt predict Qjt per agent?
+> because architecture uses counterfactual network
 
 # 17 MAY 2025
 
 > my_module.py _get_fov was not updated yet to pad constant value of 0. check for other mistakes
 
 # 20 MAY 2025
+
+- tmux train_sumrewardnormalized to warehouse_2_sumdelaynormalized
+- tmux train_sumreward to warehouse_2_sumdelay
+- tmux train_pbs to warehouse_2_PBS
+- tmux debug to warehouse_2_noPBS
+= training with PBS labels gives better performance, but still far from PBS throughput
+
+1. build dataset, either random PP or PBS, and train using that
+- will be faster, since generating data is fast, and training will be faster since it doesnt wait for env.step()
+
+2. try overfit test with PBS labels? show that training using PBS labels will lead to good throughput?
+
+# 26 MAY 2025
+- tmux train_sumrewardnormalized to warehouse_2_sumdelaynormalized
+- Qjt preds for new data still not accurate
+![loss plot](image-9.png)
+
+- tmux train_sumreward to warehouse_2_sumdelay
+- Qjt preds not accurate even in buffer
+![loss plot](image-10.png)
+
+- tmux train_pbs to warehouse_2_PBS
+- same issue, Qjt not predicting correctly
+
+- tmux debug to warehouse_2_noPBS
+- same issue
+
+1. train supervised learning PBS, using the same inputs
+
+2. use attention mechanism for Qjt
+- tmux train_ltdonly_att to warehouse_2_LTDonly_attention
+
+3. train supervised learning PBS using manual features to see if there is an improvement compared to random PP
+
+4. train Qjt only, see if it can accurately predict new data. if it does, then freeze model and use to train Lopt
+- tmux train_ltdonly to warehouse_2_LTDonly
+- should converge after 20K eps
+
+## meeting
+1. manual credit assignment, look at lower priority agent how much it is delayed, assign the delay to the pair involved
+2. supervised learning using PBS
+3. input: provide info about the nearby agents, hoping Qjt value more accurate
+4. global info to Qjt
+5. increase model size
+
+# 29 MAY 2025
+1. tmux train_ltdonly_att to warehouse_2_LTDonly_attention
+1. tmux train_ltdonly to warehouse_2_LTDonly
+- both converge, but unseen data not predicted correctly
+
+2. supervised learning PBS
+- waiting throughput results
+- trained on 1000 samples, 20 epochs, 70 agents
+- not able to solve 5000 steps in 70 agents
+- train again with more samples
+
+3. increase model size
+- tmux train_ltdonly to warehouse_2_LTDonly_attention
+- training, see if loss decreases
+> is delay calculation correct?
+
+# 30 MAY 2025
+1. supervised learning PBS
+- train on more samples
+
+2. increase model size
+- model calculation? there was a mistake, include goals that are within window_size but always calculated dist from start point, not cummulative from start to g1 to g2
+- training, see if loss decreases
+- tmux train_ltdonly to warehouse_2_LTDonly_attention
+
+3. global info to Qjt
+
+4. input: provide info about the nearby agents, hoping Qjt value more accurate
+- tmux train_neighbor to warehouse_2_neighborview
+
+## meeting
+1. compare predicted order from supervised to actual PBS order
+
+2. why the predicted values is not between [0, 1]
+
+3. manually decompose and use as reward for independent q learning
+
+4. train from total order? or just from PBS label and set tie to another class
+
+## 5 JUN 2025
+1. tmux train_neighbor to warehouse_2_neighborview
+- having problems with training
+- if len(dev_buffer) >= BATCH_SIZE:
+- solved
+- tmux train_neighbor to warehouse_2_neighborview
+
+2. supervised learning PBS
+- fixed mistake: trained on whole dataset including test set
+- train on more samples
+- used early model with 60% test acc on RHCR and got 2.176 throughput for 70 agents, QTRAN_PBS 2.175 and WHCA 2.132
+- generating 100 000 samples
+
+## 6 JUN 2025
+1. supervised learning PBS
+__CURRENT__: train on more samples
+- generating 100 000 samples
+TODO:
+- check accuracy
+- check throughput
+- check if predicted order matches PBS order
+- check prediction is between 0 and 1
+
+2. tmux train_neighbor to warehouse_2_neighborview
+- there was an error in write_buffer, solved by removing, training again
+__CURRENT__: tmux train_neighbor to warehouse_2_neighborview
+TODO:
+- see if Qjt pred of new samples is accurate
+
+3. train from total order? or just from PBS label and set tie to another class
+
 

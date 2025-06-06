@@ -74,13 +74,11 @@ class Trainer:
         self.vnet.train()
         return self
 
-    def optimize(self, batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, logger, weights):
-
+    def optimize(self, batch_obs, batch_neighbor_features, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, logger, weights):
         # move to self.device
         batch_obs = [obs.to(self.device) for obs in batch_obs]
         batch_global_reward = batch_global_reward.to(self.device)
         
-        layers = 7
         # assert batch_obs.shape == (self.batch_size, self.num_agents, layers, self.fov, self.fov), f"Expected {(self.batch_size, self.num_agents, layers, self.fov, self.fov)}, got {batch_obs.shape}"
 
         num_n_pairs = []
@@ -93,7 +91,7 @@ class Trainer:
             logger.print("batch_close_pairs:", batch_close_pairs)
 
         ### COMPUTE Q VALUES FOR EACH PAIR
-        batch_pair_enc, batch_q_vals = self.q_net(batch_obs, batch_close_pairs)
+        batch_pair_enc, batch_q_vals = self.q_net(batch_obs, batch_close_pairs, batch_neighbor_features)
         # batch_pair_enc: b x 'n_pairs' x h*2
         # batch_q_vals: b x 'n_pairs' x 2
         if self.DEBUG:
@@ -120,7 +118,6 @@ class Trainer:
         batch_actions = torch.stack(batch_actions)
         batch_actions = batch_actions.to(self.device)
 
-        # batch_actions = torch.tensor([list(pp.values()) for pp in batch_partial_prio]).view(-1, 1)
         batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze().to(self.device)
         if self.DEBUG:
             logger.print("batch_onehot_actions:", batch_onehot_actions)

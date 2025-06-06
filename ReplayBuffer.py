@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import pickle
 
 class ReplayBuffer:
     def __init__(self, buffer_size):
@@ -39,7 +40,7 @@ class PrioritizedReplayBuffer:
 
         self.freeze = freeze
 
-    def insert(self, obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals, td_error=None):
+    def insert(self, obs_fovs, neighbor_features, partial_prio, global_reward, local_rewards, groups, starts, goals, td_error=None):
         """
         Add a new experience to the buffer.
         
@@ -51,7 +52,7 @@ class PrioritizedReplayBuffer:
         if len(self.buffer) >= 64 and self.freeze == True:
             return
 
-        experience = (obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals)
+        experience = (obs_fovs, neighbor_features, partial_prio, global_reward, local_rewards, groups, starts, goals)
         max_priority = self.priorities.max() if self.buffer else 1.0
 
         if len(self.buffer) < self.capacity:
@@ -84,14 +85,14 @@ class PrioritizedReplayBuffer:
         indices = np.random.choice(len(self.buffer), batch_size, p=probabilities, replace=False)
         # experiences = [self.buffer[idx] for idx in indices]
 
-        obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals = zip(*[self.buffer[i] for i in indices])
+        obs_fovs, neighbor_features, partial_prio, global_reward, local_rewards, groups, starts, goals = zip(*[self.buffer[i] for i in indices])
 
         weights = (len(self.buffer) * probabilities[indices]) ** (-beta)
         weights /= weights.max()
 
         global_reward = torch.tensor(global_reward, dtype=torch.float32)
 
-        return obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals, indices, weights
+        return obs_fovs, neighbor_features, partial_prio, global_reward, local_rewards, groups, starts, goals, indices, weights
 
 
     def update_priorities(self, indices, td_errors):
@@ -109,7 +110,7 @@ class PrioritizedReplayBuffer:
     def __len__(self):
         return len(self.buffer)
     
-    def save_to_file(self, filename):
+    def write_to_csv(self, filename):
         """
         Print the last 500 experiences in the buffer to csv file.
         """
@@ -127,3 +128,23 @@ class PrioritizedReplayBuffer:
                 f.write(str(goals).replace(",", ";") + '\n')
 
         print(f"Buffer saved to {filename}")
+
+    def save_buffer(self, filename):
+        """
+        Save only the list of experiences (self.buffer) to a file.
+        """
+        with open(filename, 'wb') as f:
+            pickle.dump(self.buffer, f)
+        print(f"Replay buffer experiences saved to {filename}")
+
+    def load_buffer(self, filename):
+        """
+        Load a list of experiences into self.buffer, 
+        and reset priorities uniformly.
+        """
+        with open(filename, 'rb') as f:
+            self.buffer = pickle.load(f)
+        # reinitialize uniform priorities
+        self.priorities = np.ones(len(self.buffer), dtype=np.float32)
+        self.pos = len(self.buffer) % self.capacity
+        print(f"Replay buffer experiences loaded from {filename}")

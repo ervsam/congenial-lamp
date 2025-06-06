@@ -339,7 +339,7 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random', epsilon=
     return priorities, partial_prio, pred_value
 
 
-def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsilon=0.1, obs_fovs=None, buffer=None, old_start=None, old_goals=None):    
+def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsilon=0.1, obs_fovs=None, buffer=None, old_start=None, old_goals=None, neighbor_features=None):    
     USE_PENALTY = False
 
     if q_vals is None:
@@ -364,10 +364,9 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
             return None, None, None, None, None, throughput
         else:
             plan, priority_order = result
-
             paths = plan.values()
-            for i, path in enumerate(paths):
-                print(f"Agent {i}: {path}")
+            # for i, path in enumerate(paths):
+            #     print(f"Agent {i}: {path}")
 
             graph = defaultdict(list)
             for agent in range(env.num_agents):
@@ -375,8 +374,8 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
             for a, b in priority_order:
                 graph[a].append(b)
             priorities = topological_sort_pbs(graph)
+            print("utils.step(): Priority ", priorities)
 
-            print(priorities)
             start_time = time.time()
             new_start, new_goals = env.step(priorities)
             logger.print("Time to env.step:", time.time()-start_time)
@@ -427,19 +426,16 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
                 groups = env.connected_edge_groups()
                 local_rewards = []
                 group_agents = []
-
                 for group in groups:
                     set_s = set()
                     for pair in group:
                         set_s.update(pair)
                     group_agents.append(list(set_s))
-                    
                 for group in group_agents:
                     prio = []
                     for a in priorities:
                         if a in group:
                             prio.append(a)
-
                     delays = env.step_per_group(prio)
                     if delays is None:
                         # local delay is -10
@@ -448,9 +444,8 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
                     else:
                         # local delay is average
                         local_rewards.append(10 * sum([-delays[agent] for agent in group]) / len(group))
-
                 # save to buffer
-                buffer.insert(obs_fovs, partial_prio, -1, local_rewards, groups, old_start, old_goals)
+                buffer.insert(obs_fovs, neighbor_features, partial_prio, -1, local_rewards, groups, old_start, old_goals)
 
             logger.print(f"buffer length in function step: {len(buffer)}")
 

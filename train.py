@@ -27,7 +27,7 @@ from Model import Encoder
 # Set global numpy seed for reproducibility
 np.random.seed(0)
 
-config_name = "warehouse_0"
+config_name = "warehouse_2"
 
 # Load configuration file
 file_path = os.path.join(os.path.dirname(__file__), "config.yaml")
@@ -70,12 +70,16 @@ if os.path.exists(log_path):
     shutil.rmtree(log_path)
 os.makedirs(log_path)
 
+# Pure data‐generation mode (no model training)
+GENERATE_DATA_ONLY = False
+DATASET_FILE       = os.path.join(DIR, "dataset.pkl")
+
 # Use QTRAN alternative version flag
 is_QTRAN_alt = True
 
 is_logged = {
-    "Q-vals": True,
-    "difference": True,
+    "Q-vals": False,
+    "difference": False,
 }
 
 # %% LOGGER & ENVIRONMENT INITIALIZATION
@@ -128,8 +132,8 @@ class DevBuffer:
     def sample(self, batch_size):
         indices = np.random.choice(len(self.buffer), batch_size, replace=False)
 
-        obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals = zip(*[self.buffer[i] for i in indices])
-        return obs_fovs, partial_prio, global_reward, local_rewards, groups, starts, goals
+        obs_fovs, neighbor_features, partial_prio, global_reward, local_rewards, groups, starts, goals = zip(*[self.buffer[i] for i in indices])
+        return obs_fovs, neighbor_features, partial_prio, global_reward, local_rewards, groups, starts, goals
 
     def __len__(self):
         return len(self.buffer)
@@ -216,8 +220,8 @@ pbs_steps    = 0
 curriculum_loss  : list[float] = []
 
 new_start, new_goals = env.starts, env.goals
-epsilon_start = 0.8
-PBS_epsilon_start = 0.8
+epsilon_start = 0
+PBS_epsilon_start = 0
 pbs_epsilon = PBS_epsilon_start
 decay_rate = 1e-3
 
@@ -253,6 +257,24 @@ while steps < TRAIN_STEPS:
 
     old_start, old_goals = copy.deepcopy(new_start), copy.deepcopy(new_goals)
     obs_fovs = env.get_obs().to(device)
+    neighbor_features = env.get_neighbor_goal_heuristics_as_patches()
+    # WRONG (DELETE)
+    # neighbor_features = [fov.to(device) for patches in neighbor_features for fov in patches]
+    flat = [n for n_i in neighbor_features for n in n_i]
+    if flat:
+        stacked = torch.stack(flat).to(device)
+        idx = 0
+        rebuilt = []
+        for agent in neighbor_features:
+            n = len(agent)
+            agent_rebuilt = [stacked[idx + i] for i in range(n)]
+            idx += n
+            if n == 0:
+                # Replace (1, C, H, W) with your patch shape, e.g., (1, 1, 11, 11)
+                rebuilt.append(torch.empty(0, *stacked.shape[1:], device=device))
+            else:
+                rebuilt.append(torch.stack(agent_rebuilt))
+        neighbor_features = rebuilt
     close_pairs = env.get_close_pairs()
 
     if close_pairs == []:
@@ -262,442 +284,472 @@ while steps < TRAIN_STEPS:
 
     groups = env.connected_edge_groups()
 
-    # ---------- inference (no grad) ---------------------------------------
-    with torch.no_grad():
-        trainer.eval_mode()
-
-        # ---- individual Q-values --------------------------------------
-
-        pair_enc, q_vals = trainer.q_net(obs_fovs.unsqueeze(0), [close_pairs])
-        assert q_vals[0].shape == (len(close_pairs), 2)
-
-        if is_logged["Q-vals"]:
-            logger.print("Q-vals:")
-            for pair, qval in zip(close_pairs, q_vals[0]):
-                logger.print(pair, np.round(qval.detach().cpu().squeeze().numpy(), 5))
-            logger.print()
-
-        ######################### ENV STEP ###############################################
-        #  take environment step with ε-greedy / PBS policy
-        priorities, partial_prio, *_ = step(
-            env, logger, throughput, [qval.cpu() for qval in q_vals],
-            "epsilon_greedy", epsilon, pbs_epsilon,
-            obs_fovs, buffer, old_start, old_goals)
-
-        if priorities is None:      # infeasible → new episode
-            env.reset()
-            new_start, new_goals = env.starts, env.goals
-            continue
-
-        ################################ INSERT (s, a, r) TO BUFFER ########w############################
+    if GENERATE_DATA_ONLY:
+        # Only use PBS to generate priorities—skip any neural inference
+        priorities, partial_prio, pred_value, new_start, new_goals, throughput = step(
+            env, logger, throughput,
+            q_vals=torch.zeros((1, len(close_pairs), 2)), policy="random", epsilon=0, pbs_epsilon=1.0,
+            obs_fovs=obs_fovs, buffer=buffer,
+            old_start=old_start, old_goals=old_goals, neighbor_features=neighbor_features
+        )
+        logger.print("Priority ordering (PBS):", priorities, "\n")
 
         delays = env.get_delays()
         global_reward = -sum(delays)
-
         group_agents = []
         for group in groups:
             set_s = set()
             for pair in group:
                 set_s.update(pair)
             group_agents.append(list(set_s))
-
-        # local_rewards = [10 * (sum([-delays[agent] for agent in group]) / len(group)) - 0.2 for group in group_agents] # 10 * ave delays
-        # local_rewards = [(sum([-delays[agent] for agent in group])) for group in group_agents] # sum of delays
         local_rewards = [(sum([-delays[agent] for agent in group]) / 10) for group in group_agents] # sum of delays normalized
-        # local_rewards.append(env.num_agents * sum([-delays[agent] for agent in group]) / len(group))
-        # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
-        # local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
 
-        # --- 20 % of new samples go into the (frozen) dev set (store per-group) -------------
-        if np.random.rand() < 0.20:
-            # dev_buffer.add((obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals))
-            for group, local_reward in zip(groups, local_rewards):
-                group_partial_prio = {pair: partial_prio[pair] for pair in group}
-                dev_buffer.add((obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals))
-        else:
-            for group, local_reward in zip(groups, local_rewards):
-                group_partial_prio = {pair: partial_prio[pair] for pair in group}
-                buffer.insert(obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals)
-            # buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals)
+        for group, local_reward in zip(groups, local_rewards):
+            group_partial_prio = {pair: partial_prio[pair] for pair in group}
+            buffer.insert(obs_fovs, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals)
 
-        logger.print("Priority ordering:", priorities, "\n")
-        logger.print("Time to solve instance:", time.time()-timestep_start, "\n")
+        if len(buffer) == buffer.capacity:
+            buffer.save_buffer(DATASET_FILE)
+            logger.print(f"=== Dataset saved to {DATASET_FILE}; exiting. ===")
+            break
 
-        # Calculate Q'jt based on action taken (group-based sum)
-        q_prime = [sum([q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))])]
-        if len(groups) > 1:
-            chosen_q = [q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))]
-            group_q_prime = []
+    else:
+        # ---------- inference (no grad) ---------------------------------------
+        with torch.no_grad():
+            trainer.eval_mode()
+
+            # ---- individual Q-values --------------------------------------
+
+            pair_enc, q_vals = trainer.q_net(obs_fovs.unsqueeze(0), [close_pairs], [neighbor_features])
+            assert q_vals[0].shape == (len(close_pairs), 2)
+
+            if is_logged["Q-vals"]:
+                logger.print("Q-vals:")
+                for pair, qval in zip(close_pairs, q_vals[0]):
+                    logger.print(pair, np.round(qval.detach().cpu().squeeze().numpy(), 5))
+                logger.print()
+
+            ######################### ENV STEP ###############################################
+            #  take environment step with ε-greedy / PBS policy
+            priorities, partial_prio, pred_value, new_start, new_goals, throughput = step(
+                env, logger, throughput, [qval.cpu() for qval in q_vals],
+                "epsilon_greedy", epsilon, pbs_epsilon,
+                obs_fovs, buffer, old_start, old_goals, neighbor_features)
+
+            if priorities is None:      # infeasible → new episode
+                env.reset()
+                new_start, new_goals = env.starts, env.goals
+                continue
+
+            ################################ INSERT (s, a, r) TO BUFFER ############################
+
+            delays = env.get_delays()
+            global_reward = -sum(delays)
+
+            group_agents = []
             for group in groups:
-                qprim = 0
-                for pair, q in zip(close_pairs, chosen_q):
+                set_s = set()
+                for pair in group:
+                    set_s.update(pair)
+                group_agents.append(list(set_s))
+
+            # local_rewards = [10 * (sum([-delays[agent] for agent in group]) / len(group)) - 0.2 for group in group_agents] # 10 * ave delays
+            # local_rewards = [(sum([-delays[agent] for agent in group])) for group in group_agents] # sum of delays
+            local_rewards = [(sum([-delays[agent] for agent in group]) / 10) for group in group_agents] # sum of delays normalized
+            # local_rewards.append(env.num_agents * sum([-delays[agent] for agent in group]) / len(group))
+            # local_rewards.append(10 / (sum([delays[agent] for agent in group]) + 1))
+            # local_rewards.append((1.1 ** -(sum([delays[agent] for agent in group])) * 10))
+
+            # --- 20 % of new samples go into the (frozen) dev set (store per-group) -------------
+            if np.random.rand() < 0.20:
+                # dev_buffer.add((obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals))
+                for group, local_reward in zip(groups, local_rewards):
+                    group_partial_prio = {pair: partial_prio[pair] for pair in group}
+                    dev_buffer.add((obs_fovs, neighbor_features, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals))
+            else:
+                for group, local_reward in zip(groups, local_rewards):
+                    group_partial_prio = {pair: partial_prio[pair] for pair in group}
+                    buffer.insert(obs_fovs, neighbor_features, group_partial_prio, global_reward, [local_reward], [group], old_start, old_goals)
+
+                # buffer.insert(obs_fovs, partial_prio, global_reward, local_rewards, groups, old_start, old_goals)
+
+            logger.print("Priority ordering:", priorities, "\n")
+            logger.print("Time to solve instance:", time.time()-timestep_start, "\n")
+
+            # Calculate Q'jt based on action taken (group-based sum)
+            q_prime = [sum([q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))])]
+            if len(groups) > 1:
+                chosen_q = [q[a] for q, a in zip(q_vals[0], list(partial_prio.values()))]
+                group_q_prime = []
+                for group in groups:
+                    qprim = 0
+                    for pair, q in zip(close_pairs, chosen_q):
+                        if pair in group:
+                            qprim += q
+                    group_q_prime.append(qprim)
+                q_prime = group_q_prime
+            logger.print("Q'jt:", [round(q.item(), 3) for q in q_prime])
+
+            # Compute Vtot per group.
+            group_pair_enc = []
+            for group in groups:
+                subgroup_pair_enc = []
+                for pair, enc in zip(close_pairs, pair_enc[0]):
                     if pair in group:
-                        qprim += q
-                group_q_prime.append(qprim)
-            q_prime = group_q_prime
-        logger.print("Q'jt:", [round(q.item(), 3) for q in q_prime])
+                        subgroup_pair_enc.append(enc)
+                group_pair_enc.append(torch.stack(subgroup_pair_enc))
+            # batch_pair_enc : 'groups' x 'n_pairs' x h*2
+            vtot = torch.stack(trainer.vnet(group_pair_enc))
+            logger.print("Vtot:", [round(q.item(), 3) for q in vtot])
 
-        # Compute Vtot per group.
-        group_pair_enc = []
-        for group in groups:
-            subgroup_pair_enc = []
-            for pair, enc in zip(close_pairs, pair_enc[0]):
-                if pair in group:
-                    subgroup_pair_enc.append(enc)
-            group_pair_enc.append(torch.stack(subgroup_pair_enc))
-        # batch_pair_enc : 'groups' x 'n_pairs' x h*2
-        vtot = torch.stack(trainer.vnet(group_pair_enc))
-        logger.print("Vtot:", [round(q.item(), 3) for q in vtot])
-
-        actions = torch.stack(list(partial_prio.values()))
-        # logger.print("Actions:", actions)
-        # turn actions to one hot encoding and append to pair_enc
-        tmp = []
-        for enc in pair_enc:
-            tmp += enc
-        pair_enc = torch.stack(tmp)
-        batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2).float()
-        batch_onehot_actions = batch_onehot_actions.to(device)
-        batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
-
-        ############ if using Q-JOINT ############
-        q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action.to(device), [close_pairs], [groups], [len(partial_prio)])
-
-        if is_QTRAN_alt:
-            # vectorized group_onehot construction
-            # map each pair to its index in close_pairs
-            pair2idx = {pair: idx for idx, pair in enumerate(close_pairs)}
-            # build a tensor of indices for each group
-            group_idxs = [
-                torch.tensor([pair2idx[p] for p in group], dtype=torch.long, device=batch_onehot_actions.device)
-                for group in groups
-            ]
-            # gather one-hot actions per group using advanced indexing
-            group_onehot = [batch_onehot_actions[idxs] for idxs in group_idxs]
-
-            selected_Qs = []
-            for q, act in zip(q_jt_alt, group_onehot):
-                selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().cpu().numpy()))
-
-            logger.print("Q-joint chosen:")
-            for i in selected_Qs:
-                logger.print([round(j, 3) for j in i])
-
-            # print Q'jt - Qjt
-            if is_logged["difference"]:
-                logger.print("Q'jt + Vtot - Qjt:")
-                for i, group_qjt in enumerate(selected_Qs):
-                    logger.print([round(q_prime[i].item() + vtot[i].item() - j, 3) for j in group_qjt])
-            logger.print()
-        else:
-            logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
-            logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
-
-        logger.print("Global Reward:", global_reward)
-        if len(groups) > 1:
-            logger.print("Multiple groups detected")
-        logger.print("Groups:", group_agents)
-        logger.print("Delays:", delays)
-        logger.print("Local Rewards:", [round(i, 3) for i in local_rewards], "\n")
-
-
-    if steps % 250 == 0:
-        plot(losses, ylabel="Total Loss", xlabel="Steps", filename=DIR + "loss_plot.png")
-        # plot(throughput, ylabel="Throughput", xlabel="Steps", filename="throughput_plot.png")
-
-        # plot ltds, lopts, lnopts in one plot
-        plt.figure()
-        plt.plot(ltds, label="LTD", color='red')
-        plt.plot(lopts, label="LOPT", color='green')
-        plt.plot(lnopts, label="LNOPT", color='blue')
-        plt.yscale('log')
-        plt.xlabel("Steps")
-        plt.ylabel("Loss")
-        plt.legend()
-        plt.title("Loss Components")
-        plt.savefig(DIR+"loss_components_plot.png")
-        plt.close()
-
-
-    # save model
-    if steps % 5000 == 0:
-        torch.save(trainer.q_net.state_dict(), saved_model_path+f"q_net_{steps}.pth")
-        # torch.save(trainer.qjoint_net.state_dict(), f'qjoint_net_{i}.pth')
-        # torch.save(trainer.vnet.state_dict(), f'vnet_{i}.pth')
-
-    ########################################### OPTIMIZE ############################################
-    if len(buffer) >= BATCH_SIZE:
-        is_prioritized = isinstance(buffer, PrioritizedReplayBuffer)
-        if is_prioritized:
-            batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, indices, weights = buffer.sample(BATCH_SIZE)
-        else:
-            batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups = buffer.sample(BATCH_SIZE)
-
-        trainer.q_net.train()
-        trainer.qjoint_net.train()
-        loss, ltd, lopt, lnopt, td_errors = trainer.optimize(batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, logger=logger, weights=weights)
-        logger.print("training in", next(trainer.q_net.parameters()).device)      # should print 'cuda:0'
-
-        if is_QTRAN_alt:
-            logger.print("Loss:", loss, "LTD:", ltd,
-                        "LOPT:", lopt, "LNOPT-min:", lnopt)
-        else:
-            logger.print("Loss:", loss, "LTD:", ltd,
-                        "LOPT:", lopt, "LNOPT:", lnopt)
-        losses.append(loss)
-        ltds.append(ltd)
-        lopts.append(lopt)
-        lnopts.append(lnopt)
-
-        curriculum_loss.append(loss)
-
-        if is_prioritized:
-            assert len(indices) == len(td_errors), f"Length of indices {len(indices)} and td_errors {len(td_errors)} do not match"
-            buffer.update_priorities(indices, td_errors)
-
-    if len(dev_buffer) >= BATCH_SIZE and steps % 250 == 0:
-        with torch.no_grad():
-            trainer.q_net.eval()
-            trainer.qjoint_net.eval()
-            batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals = dev_buffer.sample(BATCH_SIZE)
-            
-            # move to device
-            batch_obs = [obs.to(device) for obs in batch_obs]
-            
-            num_pairs_in_group = [] # len: batch_size * 'n_groups'
-            for groups in batch_groups:
-                for group in groups:
-                    num_pairs_in_group.append(len(group))
-
-            batch_close_pairs = [list(pp.keys()) for pp in batch_partial_prio]
-            batch_pair_enc, batch_q_vals = trainer.q_net(batch_obs, batch_close_pairs)
+            actions = torch.stack(list(partial_prio.values()))
+            # logger.print("Actions:", actions)
+            # turn actions to one hot encoding and append to pair_enc
             tmp = []
-            for pair_enc in batch_pair_enc:
-                tmp += pair_enc
-            batch_pair_enc = torch.stack(tmp)
+            for enc in pair_enc:
+                tmp += enc
+            pair_enc = torch.stack(tmp)
+            batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2).float()
+            batch_onehot_actions = batch_onehot_actions.to(device)
+            batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)
 
-            batch_actions = []
-            for pp in batch_partial_prio:
-                batch_actions += list(pp.values())
-            batch_actions = torch.stack(batch_actions)
-            batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze().to(device)
-            batch_pair_enc_action = torch.concat([batch_pair_enc, batch_onehot_actions], dim=1)
+            ############ if using Q-JOINT ############
+            q_jt, q_jt_alt = trainer.qjoint_net(pair_enc, batch_pair_enc_action.to(device), [close_pairs], [groups], [len(partial_prio)])
 
-            num_n_pairs = []
-            for pp in batch_partial_prio:
-                num_n_pairs.append(len(pp.values()))
+            if is_QTRAN_alt:
+                # vectorized group_onehot construction
+                # map each pair to its index in close_pairs
+                pair2idx = {pair: idx for idx, pair in enumerate(close_pairs)}
+                # build a tensor of indices for each group
+                group_idxs = [
+                    torch.tensor([pair2idx[p] for p in group], dtype=torch.long, device=batch_onehot_actions.device)
+                    for group in groups
+                ]
+                # gather one-hot actions per group using advanced indexing
+                group_onehot = [batch_onehot_actions[idxs] for idxs in group_idxs]
 
-            q_jt, q_jt_alt = trainer.qjoint_net(batch_pair_enc, batch_pair_enc_action, batch_close_pairs, batch_groups, num_n_pairs)
+                selected_Qs = []
+                for q, act in zip(q_jt_alt, group_onehot):
+                    selected_Qs.append(list((torch.sum((q * act), dim=1)).detach().cpu().numpy()))
 
-            tmp = []
-            for t in q_jt_alt:
-                tmp += t
-            q_jt_alt = torch.stack(tmp)
+                logger.print("Q-joint chosen:")
+                for i in selected_Qs:
+                    logger.print([round(j, 3) for j in i])
 
-            selected_Q = torch.sum(q_jt_alt * batch_onehot_actions, dim=1).unsqueeze(1) # b x 1
+                # print Q'jt - Qjt
+                if is_logged["difference"]:
+                    logger.print("Q'jt + Vtot - Qjt:")
+                    for i, group_qjt in enumerate(selected_Qs):
+                        logger.print([round(q_prime[i].item() + vtot[i].item() - j, 3) for j in group_qjt])
+                logger.print()
+            else:
+                logger.print("Q-joint predicted:", [round(i.item(), 2) for i in q_jt[0]], " = ", q_jt[0].sum().item())
+                logger.print("Q'jt - Qjt:", q_prime.item() - q_jt[0].sum().item(), "\n")
 
-            logger.print("------------------------ DEV BUFFER ------------------------")
+            logger.print("Global Reward:", global_reward)
+            if len(groups) > 1:
+                logger.print("Multiple groups detected")
+            logger.print("Groups:", group_agents)
+            logger.print("Delays:", delays)
+            logger.print("Local Rewards:", [round(i, 3) for i in local_rewards], "\n")
 
-            logger.print("Q-joint predicted, local rewards:")
 
-            selected_Q_each_pair = [round(i, 3) for i in selected_Q.squeeze().detach().cpu().numpy()]
+        if steps % 250 == 0:
+            plot(losses, ylabel="Total Loss", xlabel="Steps", filename=DIR + "loss_plot.png")
+            # plot(throughput, ylabel="Throughput", xlabel="Steps", filename="throughput_plot.png")
 
-            group_Q = []                                             # store tensors
-            cursor = 0
-            for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
-                group_Q.append((selected_Q_each_pair[cursor:cursor+n]))     # tensor with grad
-                cursor += n
+            # plot ltds, lopts, lnopts in one plot
+            plt.figure()
+            plt.plot(ltds, label="LTD", color='red')
+            plt.plot(lopts, label="LOPT", color='green')
+            plt.plot(lnopts, label="LNOPT", color='blue')
+            plt.yscale('log')
+            plt.xlabel("Steps")
+            plt.ylabel("Loss")
+            plt.legend()
+            plt.title("Loss Components")
+            plt.savefig(DIR+"loss_components_plot.png")
+            plt.close()
 
-            episode_Q = []                                           # length = batch_size
-            cursor = 0
-            for groups in batch_groups:                                # list-of-lists
-                k = len(groups)
-                episode_Q.append(group_Q[cursor:cursor+k])  # tensor with grad
-                cursor += k
 
-            for q, r in zip(episode_Q, batch_local_rewards):
-                logger.print(q, "---------------------", r)
-            
-            tmp = []
-            for r in batch_local_rewards:
-                tmp += r
-            batch_local_rewards = torch.tensor(tmp, dtype=torch.float32, device=device)
+        # save model
+        if steps % 5000 == 0:
+            torch.save(trainer.q_net.state_dict(), saved_model_path+f"q_net_{steps}.pth")
+            # torch.save(trainer.qjoint_net.state_dict(), f'qjoint_net_{i}.pth')
+            # torch.save(trainer.vnet.state_dict(), f'vnet_{i}.pth')
 
-            # expand
-            tmp = []
-            for idx, num in enumerate(num_pairs_in_group):
-                tmp += [batch_local_rewards[idx]] * num
-            batch_local_rewards = torch.stack(tmp)
+        ########################################### OPTIMIZE ############################################
+        if len(buffer) >= BATCH_SIZE:
+            is_prioritized = isinstance(buffer, PrioritizedReplayBuffer)
+            if is_prioritized:
+                batch_obs, batch_neighbor_features, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, indices, weights = buffer.sample(BATCH_SIZE)
+            else:
+                batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups = buffer.sample(BATCH_SIZE)
 
-            ltd_raw = F.mse_loss(selected_Q, batch_local_rewards.unsqueeze(1), reduction='none')
+            trainer.q_net.train()
+            trainer.qjoint_net.train()
+            loss, ltd, lopt, lnopt, td_errors = trainer.optimize(batch_obs, batch_neighbor_features, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, logger=logger, weights=weights)
+            logger.print("training in", next(trainer.q_net.parameters()).device)      # should print 'cuda:0'
 
-            dup_factor = torch.tensor(num_pairs_in_group, device=device)
-            norm = torch.tensor(dup_factor).repeat_interleave(dup_factor)
-            ltd_pairs = ltd_raw.squeeze() / norm          # both (N,)
-            ltd_pairs = ltd_pairs.unsqueeze(1) 
+            if is_QTRAN_alt:
+                logger.print("Loss:", loss, "LTD:", ltd,
+                            "LOPT:", lopt, "LNOPT-min:", lnopt)
+            else:
+                logger.print("Loss:", loss, "LTD:", ltd,
+                            "LOPT:", lopt, "LNOPT:", lnopt)
+            losses.append(loss)
+            ltds.append(ltd)
+            lopts.append(lopt)
+            lnopts.append(lnopt)
 
-            # --- aggregate to group level -------------------------------------------
-            group_ltd = []                                             # store tensors
-            cursor = 0
-            for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
-                group_ltd.append(ltd_pairs[cursor:cursor+n].sum())     # tensor with grad
-                cursor += n
-            group_ltd = torch.stack(group_ltd)                         # (G,) keeps grad
+            curriculum_loss.append(loss)
 
-            weights = torch.as_tensor(weights, device=device, dtype=group_ltd.dtype)
+            if is_prioritized:
+                assert len(indices) == len(td_errors), f"Length of indices {len(indices)} and td_errors {len(td_errors)} do not match"
+                buffer.update_priorities(indices, td_errors)
 
-            exp_w = torch.repeat_interleave(weights, torch.as_tensor([len(g) for g in batch_groups], device=device))
-
-            # --- aggregate to episode level -------------------------------------------
-            # episode_ltd = []                                           # length = batch_size
-            # cursor = 0
-            # for groups in batch_groups:                                # list-of-lists
-            #     k = len(groups)
-            #     episode_ltd.append(group_ltd[cursor:cursor+k].mean())  # tensor with grad
-            #     cursor += k
-            # episode_ltd = torch.stack(episode_ltd)                     # (B,) keeps grad
-
-            logger.print("DEV LTD:", (exp_w * group_ltd).mean())
-
-            def bucket_error(pred, target):
-                buckets = {}
-                for p, t in zip(pred, target):
-                    if round(float(t), 2) not in buckets:
-                        buckets[round(float(t), 2)] = []
-                    buckets[round(float(t), 2)].append(abs(p-t))
-                return {k: np.mean(v) if v else 0 for k,v in buckets.items()}
-
-            # after every dev pass
-            errs = bucket_error(selected_Q.detach().cpu().numpy(), batch_local_rewards.detach().cpu().numpy())
-            logger.print(errs)
-
-            # encoder = trainer.q_net.encoder               # shortcut
-            # encoder.eval()
-
-            # # ---- collect training set -------------------------------------------------
-            # train_lat, train_dom, train_rar = unpack_buffer(buffer, encoder)   # main PER buffer
-            # train_dom[:] = 0                                          # 0 = train
-
-            # # ---- collect dev set ------------------------------------------------------
-            # dev_lat, dev_dom, dev_rar = unpack_buffer(dev_buffer, encoder)
-            # dev_dom[:] = 1                                            # 1 = dev
-
-            # Z       = torch.cat([train_lat, dev_lat]).numpy()         # (N, D)
-            # domain  = np.concatenate([train_dom, dev_dom])
-            # rarity  = np.concatenate([train_rar, dev_rar])
-
-            # # logger.print("domain", domain)
-            # # logger.print("rarity", rarity)
-
-            # for method in ("pca", "tsne"):
-            #     XY = embed(Z, method)
-            #     # logger.print("XY", XY)
-            #     # logger.print("XY shape", XY.shape)
+        if len(dev_buffer) >= BATCH_SIZE and steps % 250 == 0:
+            with torch.no_grad():
+                trainer.q_net.eval()
+                trainer.qjoint_net.eval()
+                batch_obs, batch_neighbor_features, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals = dev_buffer.sample(BATCH_SIZE)
                 
-            #     plt.figure(figsize=(6,5))
+                # move to device
+                batch_obs = [obs.to(device) for obs in batch_obs]
+                num_pairs_in_group = [] # len: batch_size * 'n_groups'
+                for groups in batch_groups:
+                    for group in groups:
+                        num_pairs_in_group.append(len(group))
 
-            #     # --- colour code -------------------------------------------------------
-            #     colour = ["b", "r"]       # 0=train,1=dev
-            #     marker = ["o", "x"]                       # 0=common,1=rare
+                batch_close_pairs = [list(pp.keys()) for pp in batch_partial_prio]
+                batch_pair_enc, batch_q_vals = trainer.q_net(batch_obs, batch_close_pairs, batch_neighbor_features)
+                tmp = []
+                for pair_enc in batch_pair_enc:
+                    tmp += pair_enc
+                batch_pair_enc = torch.stack(tmp)
 
-            #     for d in (0,1):
-            #         for r in (0,1):
-            #             idx = np.where((domain==d) & (rarity==r))[0]
-            #             # logger.print(XY[idx,0], XY[idx,1])
-            #             plt.scatter(XY[idx,0], XY[idx,1],
-            #                         c=colour[d],
-            #                         marker=marker[r],
-            #                         s=12, alpha=0.6,
-            #                         label=f'{"train" if d==0 else "dev"} '
-            #                             f'{"rare" if r==1 else "common"}')
+                batch_actions = []
+                for pp in batch_partial_prio:
+                    batch_actions += list(pp.values())
+                batch_actions = torch.stack(batch_actions)
+                batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze().to(device)
+                batch_pair_enc_action = torch.concat([batch_pair_enc, batch_onehot_actions], dim=1)
 
-            #     plt.title(f"{method.upper()} of encoder features")
-            #     plt.legend(markerscale=1.5, fontsize=8)
-            #     plt.tight_layout()
-            #     plt.savefig(f"latent_{method}.png", dpi=180)
-            #     plt.close()
+                num_n_pairs = []
+                for pp in batch_partial_prio:
+                    num_n_pairs.append(len(pp.values()))
 
-            # encoder.train()
+                q_jt, q_jt_alt = trainer.qjoint_net(batch_pair_enc, batch_pair_enc_action, batch_close_pairs, batch_groups, num_n_pairs)
 
-            # y_is_rare = (batch_local_rewards.abs() > 0.5).float()      # 0 or 1 target
-            # logit   = trainer.qjoint_net.rare_head(batch_pair_enc).squeeze()
+                tmp = []
+                for t in q_jt_alt:
+                    tmp += t
+                q_jt_alt = torch.stack(tmp)
 
-            # prob_rare = torch.sigmoid(logit)
-            # pred      = (prob_rare > 0.5).float()
-            # acc       = (pred == y_is_rare).float().mean()
-            # rare_bce = F.binary_cross_entropy_with_logits(logit, y_is_rare)
-            # logger.print(f'aux-BCE: {rare_bce.item():.4f} | aux-acc: {acc.item():.3f}')
+                selected_Q = torch.sum(q_jt_alt * batch_onehot_actions, dim=1).unsqueeze(1) # b x 1
+
+                logger.print("------------------------ DEV BUFFER ------------------------")
+
+                logger.print("Q-joint predicted, local rewards:")
+
+                selected_Q_each_pair = [round(i, 3) for i in selected_Q.squeeze().detach().cpu().numpy()]
+
+                group_Q = []                                             # store tensors
+                cursor = 0
+                for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
+                    group_Q.append((selected_Q_each_pair[cursor:cursor+n]))     # tensor with grad
+                    cursor += n
+
+                episode_Q = []                                           # length = batch_size
+                cursor = 0
+                for groups in batch_groups:                                # list-of-lists
+                    k = len(groups)
+                    episode_Q.append(group_Q[cursor:cursor+k])  # tensor with grad
+                    cursor += k
+
+                for q, r in zip(episode_Q, batch_local_rewards):
+                    logger.print(q, "---------------------", r)
+                
+                tmp = []
+                for r in batch_local_rewards:
+                    tmp += r
+                batch_local_rewards = torch.tensor(tmp, dtype=torch.float32, device=device)
+
+                # expand
+                tmp = []
+                for idx, num in enumerate(num_pairs_in_group):
+                    tmp += [batch_local_rewards[idx]] * num
+                batch_local_rewards = torch.stack(tmp)
+
+                ltd_raw = F.mse_loss(selected_Q, batch_local_rewards.unsqueeze(1), reduction='none')
+
+                dup_factor = torch.tensor(num_pairs_in_group, device=device)
+                norm = torch.tensor(dup_factor).repeat_interleave(dup_factor)
+                ltd_pairs = ltd_raw.squeeze() / norm          # both (N,)
+                ltd_pairs = ltd_pairs.unsqueeze(1) 
+
+                # --- aggregate to group level -------------------------------------------
+                group_ltd = []                                             # store tensors
+                cursor = 0
+                for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
+                    group_ltd.append(ltd_pairs[cursor:cursor+n].sum())     # tensor with grad
+                    cursor += n
+                group_ltd = torch.stack(group_ltd)                         # (G,) keeps grad
+
+                weights = torch.as_tensor(weights, device=device, dtype=group_ltd.dtype)
+
+                exp_w = torch.repeat_interleave(weights, torch.as_tensor([len(g) for g in batch_groups], device=device))
+
+                # --- aggregate to episode level -------------------------------------------
+                # episode_ltd = []                                           # length = batch_size
+                # cursor = 0
+                # for groups in batch_groups:                                # list-of-lists
+                #     k = len(groups)
+                #     episode_ltd.append(group_ltd[cursor:cursor+k].mean())  # tensor with grad
+                #     cursor += k
+                # episode_ltd = torch.stack(episode_ltd)                     # (B,) keeps grad
+
+                logger.print("DEV LTD:", (exp_w * group_ltd).mean())
+
+                def bucket_error(pred, target):
+                    buckets = {}
+                    for p, t in zip(pred, target):
+                        if round(float(t), 2) not in buckets:
+                            buckets[round(float(t), 2)] = []
+                        buckets[round(float(t), 2)].append(abs(p-t))
+                    return {k: np.mean(v) if v else 0 for k,v in buckets.items()}
+
+                # after every dev pass
+                errs = bucket_error(selected_Q.detach().cpu().numpy(), batch_local_rewards.detach().cpu().numpy())
+                logger.print(errs)
+
+                # encoder = trainer.q_net.encoder               # shortcut
+                # encoder.eval()
+
+                # # ---- collect training set -------------------------------------------------
+                # train_lat, train_dom, train_rar = unpack_buffer(buffer, encoder)   # main PER buffer
+                # train_dom[:] = 0                                          # 0 = train
+
+                # # ---- collect dev set ------------------------------------------------------
+                # dev_lat, dev_dom, dev_rar = unpack_buffer(dev_buffer, encoder)
+                # dev_dom[:] = 1                                            # 1 = dev
+
+                # Z       = torch.cat([train_lat, dev_lat]).numpy()         # (N, D)
+                # domain  = np.concatenate([train_dom, dev_dom])
+                # rarity  = np.concatenate([train_rar, dev_rar])
+
+                # # logger.print("domain", domain)
+                # # logger.print("rarity", rarity)
+
+                # for method in ("pca", "tsne"):
+                #     XY = embed(Z, method)
+                #     # logger.print("XY", XY)
+                #     # logger.print("XY shape", XY.shape)
+                    
+                #     plt.figure(figsize=(6,5))
+
+                #     # --- colour code -------------------------------------------------------
+                #     colour = ["b", "r"]       # 0=train,1=dev
+                #     marker = ["o", "x"]                       # 0=common,1=rare
+
+                #     for d in (0,1):
+                #         for r in (0,1):
+                #             idx = np.where((domain==d) & (rarity==r))[0]
+                #             # logger.print(XY[idx,0], XY[idx,1])
+                #             plt.scatter(XY[idx,0], XY[idx,1],
+                #                         c=colour[d],
+                #                         marker=marker[r],
+                #                         s=12, alpha=0.6,
+                #                         label=f'{"train" if d==0 else "dev"} '
+                #                             f'{"rare" if r==1 else "common"}')
+
+                #     plt.title(f"{method.upper()} of encoder features")
+                #     plt.legend(markerscale=1.5, fontsize=8)
+                #     plt.tight_layout()
+                #     plt.savefig(f"latent_{method}.png", dpi=180)
+                #     plt.close()
+
+                # encoder.train()
+
+                # y_is_rare = (batch_local_rewards.abs() > 0.5).float()      # 0 or 1 target
+                # logit   = trainer.qjoint_net.rare_head(batch_pair_enc).squeeze()
+
+                # prob_rare = torch.sigmoid(logit)
+                # pred      = (prob_rare > 0.5).float()
+                # acc       = (pred == y_is_rare).float().mean()
+                # rare_bce = F.binary_cross_entropy_with_logits(logit, y_is_rare)
+                # logger.print(f'aux-BCE: {rare_bce.item():.4f} | aux-acc: {acc.item():.3f}')
 
 
-    logger.print("____________________________________________________________________________")
-    
-    if steps % 25000 == 0:
-        logger.set_filename(log_path + f"log_{steps}.txt")
+        logger.print("____________________________________________________________________________")
+        
+        if steps % 25000 == 0:
+            logger.set_filename(log_path + f"log_{steps}.txt")
 
-    if steps % 500 == 0:
-        buffer.save_to_file(DIR + "buffer.csv")
+        # if steps % 500 == 0:
+        #     buffer.write_to_csv(DIR + "buffer.csv")
 
-    # check prediction of data in buffer
-    if steps % 100 == 0:
-        with torch.no_grad():
-            batch_obs, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, indices, weights = buffer.sample(BATCH_SIZE)
+        # check prediction of data in buffer
+        if steps % 100 == 0:
+            with torch.no_grad():
+                batch_obs, batch_neighbor_features, batch_partial_prio, batch_global_reward, batch_local_rewards, batch_groups, batch_starts, batch_goals, indices, weights = buffer.sample(BATCH_SIZE)
 
-            # move to device
-            batch_obs = [obs.to(device) for obs in batch_obs]
+                # move to device
+                batch_obs = [obs.to(device) for obs in batch_obs]
 
-            num_pairs_in_group = [] # len: batch_size * 'n_groups'
-            for groups in batch_groups:
-                for group in groups:
-                    num_pairs_in_group.append(len(group))
+                num_pairs_in_group = [] # len: batch_size * 'n_groups'
+                for groups in batch_groups:
+                    for group in groups:
+                        num_pairs_in_group.append(len(group))
 
-            batch_close_pairs = [list(pp.keys()) for pp in batch_partial_prio]
-            batch_pair_enc, batch_q_vals = trainer.q_net(batch_obs, batch_close_pairs)
-            tmp = []
-            for pair_enc in batch_pair_enc:
-                tmp += pair_enc
-            batch_pair_enc = torch.stack(tmp)
+                batch_close_pairs = [list(pp.keys()) for pp in batch_partial_prio]
+                batch_pair_enc, batch_q_vals = trainer.q_net(batch_obs, batch_close_pairs, batch_neighbor_features)
+                tmp = []
+                for pair_enc in batch_pair_enc:
+                    tmp += pair_enc
+                batch_pair_enc = torch.stack(tmp)
 
-            batch_actions = []
-            for pp in batch_partial_prio:
-                batch_actions += list(pp.values())
-            batch_actions = torch.stack(batch_actions)
-            batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze().to(device)
-            batch_pair_enc_action = torch.concat([batch_pair_enc, batch_onehot_actions], dim=1)
+                batch_actions = []
+                for pp in batch_partial_prio:
+                    batch_actions += list(pp.values())
+                batch_actions = torch.stack(batch_actions)
+                batch_onehot_actions = F.one_hot(batch_actions, num_classes=2).squeeze().to(device)
+                batch_pair_enc_action = torch.concat([batch_pair_enc, batch_onehot_actions], dim=1)
 
-            num_n_pairs = []
-            for pp in batch_partial_prio:
-                num_n_pairs.append(len(pp.values()))
+                num_n_pairs = []
+                for pp in batch_partial_prio:
+                    num_n_pairs.append(len(pp.values()))
 
-            q_jt, q_jt_alt = trainer.qjoint_net(batch_pair_enc, batch_pair_enc_action, batch_close_pairs, batch_groups, num_n_pairs)
+                q_jt, q_jt_alt = trainer.qjoint_net(batch_pair_enc, batch_pair_enc_action, batch_close_pairs, batch_groups, num_n_pairs)
 
-            tmp = []
-            for t in q_jt_alt:
-                tmp += t
-            q_jt_alt = torch.stack(tmp)
+                tmp = []
+                for t in q_jt_alt:
+                    tmp += t
+                q_jt_alt = torch.stack(tmp)
 
-            selected_Q = torch.sum(q_jt_alt * batch_onehot_actions, dim=1).unsqueeze(1) # b x 1
+                selected_Q = torch.sum(q_jt_alt * batch_onehot_actions, dim=1).unsqueeze(1) # b x 1
 
-            logger.print("------------------------ checkpoint ------------------------")
+                logger.print("------------------------ checkpoint ------------------------")
 
-            logger.print("Q-joint predicted, local rewards:")
+                logger.print("Q-joint predicted, local rewards:")
 
-            selected_Q_each_pair = [round(i, 3) for i in selected_Q.squeeze().detach().cpu().numpy()]
+                selected_Q_each_pair = [round(i, 3) for i in selected_Q.squeeze().detach().cpu().numpy()]
 
-            group_Q = []                                             # store tensors
-            cursor = 0
-            for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
-                group_Q.append((selected_Q_each_pair[cursor:cursor+n]))     # tensor with grad
-                cursor += n
+                group_Q = []                                             # store tensors
+                cursor = 0
+                for n in num_pairs_in_group:                               # e.g. [2,8,5 …]
+                    group_Q.append((selected_Q_each_pair[cursor:cursor+n]))     # tensor with grad
+                    cursor += n
 
-            episode_Q = []                                           # length = batch_size
-            cursor = 0
-            for groups in batch_groups:                                # list-of-lists
-                k = len(groups)
-                episode_Q.append(group_Q[cursor:cursor+k])  # tensor with grad
-                cursor += k
+                episode_Q = []                                           # length = batch_size
+                cursor = 0
+                for groups in batch_groups:                                # list-of-lists
+                    k = len(groups)
+                    episode_Q.append(group_Q[cursor:cursor+k])  # tensor with grad
+                    cursor += k
 
-            for q, r in zip(episode_Q, batch_local_rewards):
-                logger.print(q, "---------------------", [round(i, 3) for i in r])
+                for q, r in zip(episode_Q, batch_local_rewards):
+                    logger.print(q, "---------------------", [round(i, 3) for i in r])
 
 
 # %%

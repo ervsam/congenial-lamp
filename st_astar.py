@@ -1,8 +1,6 @@
 # SPACE TIME A* ALGORITHM
-
 import heapq
 import copy
-
 
 class Node:
     def __init__(self, x, y, t, cost, heuristic, parent=None):
@@ -35,22 +33,30 @@ def is_valid(old_x, old_y, x, y, t, grid, dynamic_constraints, edge_constraints)
     return True
 
 
-def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
+def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints, max_t=None):
     counter = 0  # Global counter
-
     goals = copy.deepcopy(goals)
     goal = goals.pop(0)
     start_node = Node(start[0], start[1], 0, 0, heuristic(start[0], start[1], goal[0], goal[1]))
     goal_node = Node(goal[0], goal[1], 0, 0, 0)
-
     open_list = []
     closed_list = set()
-
     heapq.heappush(open_list, (start_node, counter))
     counter += 1
 
+    # Track the farthest node we ever expanded
+    farthest_node = start_node
+
     while open_list:
         current_node, _ = heapq.heappop(open_list)
+
+        # Track the deepest node (max t)
+        if current_node.t > farthest_node.t:
+            farthest_node = current_node
+
+        # Early exit: max search depth reached
+        if max_t is not None and current_node.t > max_t:
+            continue  # Don't expand further at this node
 
         # IF GOAL IS FOUND
         if (current_node.x, current_node.y) == (goal_node.x, goal_node.y):
@@ -64,7 +70,6 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
                 open_list = []
                 heapq.heappush(open_list, (new_node, counter))
                 counter += 1
-
                 current_node, _ = heapq.heappop(open_list)
                 closed_list = set()
 
@@ -87,15 +92,25 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints):
             new_x = current_node.x + dx
             new_y = current_node.y + dy
             new_t = current_node.t + 1
-
             if is_valid(current_node.x, current_node.y, new_x, new_y, new_t, grid, dynamic_constraints, edge_constraints):
                 new_node = Node(new_x, new_y, new_t, current_node.cost + 1,
                                 heuristic(new_x, new_y, goal_node.x, goal_node.y), current_node)
-
                 if (new_x, new_y, new_t) not in closed_list:
                     heapq.heappush(open_list, (new_node, counter))
                     counter += 1
 
-    # no path found
-    # print("st_astar: No path found", start, goal)
-    return None
+    # If no path found, return the path to the farthest node
+    if max_t is None:
+        return None
+
+    path = []
+    current_node = farthest_node
+    while current_node:
+        path.append((current_node.x, current_node.y, current_node.t))
+        current_node = current_node.parent
+
+    path = path[::-1] if path else None
+
+    if len(path) < max_t:
+        return None
+    return path

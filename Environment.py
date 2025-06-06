@@ -5,6 +5,7 @@ import numpy as np
 import os
 from collections import defaultdict
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 
 from utils import *
 
@@ -91,7 +92,7 @@ class Environment:
             self.goals = self._get_goals_locs()
 
         # generate heuristic map
-        if heuristic_map_file and os.path.exists(heuristic_map_file):
+        if heuristic_map_file and os.path.exists(os.path.join(os.path.dirname(__file__), heuristic_map_file)):
             logger.print("Environment.__init__: loading heuristic map from file")
             self.heuristic_map = np.load(root+heuristic_map_file, allow_pickle=True).item()
         else:
@@ -206,8 +207,14 @@ class Environment:
 
         self.DHC_heur = self._get_DHC_heur()
 
+    
 
     def step(self, priorities):
+        # Prepare optimal path planning in parallel:
+        def plan_optimal(args):
+            agent, starts, goals, grid_map, window_size = args
+            return space_time_astar(grid_map, starts[agent], goals, {}, {})
+        
         self.goal_reached = 0
         self.optimal_goal_reached = 0
         self.goal_reached_per_agent = [0 for _ in range(self.num_agents)]
@@ -224,13 +231,50 @@ class Environment:
         temp_paths = []
         temp_opt_paths = []
 
-        for agent in priorities:
+        goals_to_plan = []
+        for idx, agent in enumerate(priorities):
+            # goals_tmp = self.goals[agent][:self.window_size+1]
+
+            goals_within = []
+            curr_pos = self.starts[agent]
+            cumulative_dist = 0
+            for g in self.goals[agent]:
+                dist = self.heuristic_map[curr_pos][g[0], g[1]]
+                if cumulative_dist + dist > self.window_size:
+                    break
+                cumulative_dist += dist
+                goals_within.append(g)
+                curr_pos = g  # Next segment is from here
+            extra_goal = None
+            for g in self.goals[agent][len(goals_within):]:
+                dist = self.heuristic_map[curr_pos][g[0], g[1]]
+                if cumulative_dist + dist > self.window_size:
+                    extra_goal = g
+                    break
+            if extra_goal is not None:
+                goals_tmp = goals_within + [extra_goal]
+            else:
+                goals_tmp = goals_within
+            if not goals_tmp:
+                goals_tmp = [self.goals[agent][0]]
+
+            goals_to_plan.append(goals_tmp)
+
+        # Prepare the argument list for all agents:
+        opt_args = [
+            (agent, self.starts, goals, self.grid_map, self.window_size)
+            for (agent, goals) in zip(priorities, goals_to_plan)
+        ]
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            temp_opt_paths = list(executor.map(plan_optimal, opt_args))
+
+        for idx, agent in enumerate(priorities):
             assert len(priorities) == self.num_agents, "Environment.step(): priorities length is not equal to number of agents"
             
-            goals_to_plan = self.goals[agent][:self.window_size]
-            path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, self.dynamic_constraints, self.edge_constraints)
+            # print("Env.step: Agent", agent, self.starts[agent], "planning for goals", goals_to_plan[idx])
 
-            # print(f"Agent {agent}:", path)
+            path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan[idx], self.dynamic_constraints, self.edge_constraints)
+            # print(f"Env.step: Agent {agent}", path)
 
             if path is None:
                 return None, None
@@ -238,12 +282,10 @@ class Environment:
             temp_paths.append(path)
             self.actual_path_lengths[agent] = path
 
-            optimal_path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, {}, {})
-
-            temp_opt_paths.append(optimal_path)
-            self.optimal_path_lengths[agent] = optimal_path
-
-            self.optimal_starts[agent] = (optimal_path[self.window_size][0], optimal_path[self.window_size][1])
+            # optimal_path = space_time_astar(self.grid_map, self.starts[agent], goals_to_plan, {}, {})
+            # temp_opt_paths.append(optimal_path)
+            self.optimal_path_lengths[agent] = temp_opt_paths[idx]
+            self.optimal_starts[agent] = (temp_opt_paths[idx][self.window_size][0], temp_opt_paths[idx][self.window_size][1])
 
             # add path to dynamic constraints (only add the first window_size elements)
             for y, x, t in path:
@@ -486,6 +528,36 @@ class Environment:
 
         return obs_fovs
 
+    def get_neighbor_goal_heuristics_as_patches(self):
+        """
+        For each agent, returns a list of FOV patches for all its neighbors' goal heuristics.
+        Returns:
+            List[List[Tensor]]: shape (num_agents, num_neighbors_i, C, fov, fov)
+        """
+        num_agents = self.num_agents
+        neighbor_features = []
+        for agent in range(num_agents):
+            x, y = self.starts[agent]
+            neighbors = self._get_neighboring_agents(agent)
+            patches = []
+            for neighbor in neighbors:
+                neighbor_goal = self.goals[neighbor][0]
+                heur_map = self.heuristic_map[neighbor_goal]
+
+                padded_grid = np.pad(heur_map, pad_width=self.fov//2, mode='constant', constant_values=np.inf)
+                heur = padded_grid[x:x+self.fov, y:y+self.fov]
+                # normalize the heuristic map
+                max_val = np.max(heur[heur < np.inf])
+                heur_fov = heur / max_val
+                
+                # Optionally expand dims to match encoder input shape, e.g., (1, fov, fov)
+                # and to float32 tensor
+                heur_fov = torch.tensor(heur_fov, dtype=torch.float32).unsqueeze(0)
+                heur_fov = torch.where(torch.isinf(heur_fov), torch.tensor(1), heur_fov)
+                patches.append(heur_fov)
+            neighbor_features.append(patches)
+        return neighbor_features
+
 
     def _get_neighboring_agents(self, agent):
         neighbors = []
@@ -508,11 +580,12 @@ class Environment:
 
     def get_delays(self):
         # UPDATE: delay = actual path length - "if no other agents" path length
-        updated_delays = []
+        delays = []
         for agent in range(self.num_agents):
-            updated_delays.append(len(self.actual_path_lengths[agent]) - len(self.optimal_path_lengths[agent]))
+            # self.logger.print(f"Env.get_delays: agent {agent} actual path: {self.actual_path_lengths[agent]}, optimal path: {self.optimal_path_lengths[agent]}")
+            delays.append(len(self.actual_path_lengths[agent]) - len(self.optimal_path_lengths[agent]))
 
-        return updated_delays
+        return delays
 
 
     class UnionFind:

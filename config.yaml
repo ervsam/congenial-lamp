@@ -38,20 +38,20 @@ warehouse_2:
   
   training:
     OVERFIT_TEST: 0
-    LAMBDA: 0.5
+    LAMBDA: 0
     N_ACTIONS: 2
 
     BATCH_SIZE: 64
     LR: 1e-3
-    BUFFER_SIZE: 30000
+    BUFFER_SIZE: 50000
     TRAIN_STEPS: 1e10
 
-    DEVICE: "cuda:4"
-    USE_PBS: True
+    DEVICE: "cuda:1"
+    USE_PBS: False
     USE_CURRICULUM: False
 
   paths:
-    results: "warehouse_2_debug/"
+    results: "warehouse_2_supervise/"
     map_file: "maps/warehouse_2/grid_map.npy"
     heur_file: "maps/warehouse_2/heuristic.npy"
     goals_locs: "maps/warehouse_2/goal_options.npy"

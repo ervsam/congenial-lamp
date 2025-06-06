@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from torch_scatter import scatter_mean, scatter_sum
 
-LATENT_DIM = 64
+LATENT_DIM = 256
 
 # %% Encoder
 class ResBlock(nn.Module):
@@ -38,11 +38,11 @@ class Encoder(nn.Module):
             nn.Conv2d(32, 16, 1), 
             nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(16*11*11, 64),
-            nn.LeakyReLU(), # 64-d latent
+            nn.Linear(16*11*11, hid_dim),
+            nn.LeakyReLU()
         )
-        self.coord_fc = nn.Linear(2, 32)
-        self.out      = nn.Linear(64+32, 64)
+        self.coord_fc = nn.Linear(2, 64)
+        self.out      = nn.Linear(hid_dim + 64, hid_dim)
 
     def forward(self, x, coords):
         h_img   = self.conv(x)
@@ -59,6 +59,16 @@ class QNetwork(nn.Module):
         self.hid_dim = LATENT_DIM
         self.encoder = Encoder(hid_dim=self.hid_dim)
 
+        self.NeighborHeurEncoder = nn.Sequential(
+            nn.Conv2d(1, 8, 3, padding=1),
+            nn.LeakyReLU(),
+            nn.Conv2d(8, 4, 3, padding=1),
+            nn.LeakyReLU(),
+            nn.Flatten(),
+            nn.Linear(4 * 11 * 11, self.hid_dim),
+            nn.LeakyReLU()
+        )
+
         # utility net (concatenation path)
         self.qnet = nn.Sequential(
             nn.Linear(self.hid_dim * 2, self.hid_dim),
@@ -71,9 +81,13 @@ class QNetwork(nn.Module):
             nn.Linear(self.hid_dim, 2),        # 2 actions
         )
 
+        # New: Neighbor attention module (can use MultiheadAttention)
+        self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=2, batch_first=True)
+
     def forward(self,
                 batch_obs: list[torch.Tensor],
-                batch_close_pairs: list[list[tuple[int,int]]]
+                batch_close_pairs: list[list[tuple[int,int]]],
+                batch_neighbor_patches: list[list[torch.Tensor]] = None,  # list of (num_agents, num_neighbors, C, F, F)
             ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """
         Parameters
@@ -113,6 +127,34 @@ class QNetwork(nn.Module):
         # split back – tuple of tensors, one per episode
         batch_enc = torch.split(flat_encoded_obs, num_agents_list, dim=0)   # B × (N_i, H)
 
+
+        # ----- Encode neighbor patches -----
+        # batch_neighbor_patches: list of (num_agents, num_neighbors, C, F, F)
+        if batch_neighbor_patches is not None:
+            agent_with_neighbor_embeds = []
+            for enc_agents, neighbor_patches in zip(batch_enc, batch_neighbor_patches):
+                embeds = []
+                for i, agent_embed in enumerate(enc_agents):
+                    # neighbor_patches[i]: (num_neighbors, C, F, F)
+                    if neighbor_patches[i].shape[0] == 0:
+                        # No neighbors: fallback to agent's own encoding
+                        fused = agent_embed
+                    else:
+                        neighbor_embeds = self.NeighborHeurEncoder(neighbor_patches[i].to(device))  # (num_neighbors, 64)
+
+                        # Attention: Query = agent, Key/Value = neighbors
+                        attn_out, _ = self.neighbor_attn(
+                            agent_embed.unsqueeze(0).unsqueeze(0),    # (1, 1, H)
+                            neighbor_embeds.unsqueeze(0),             # (1, N, H)
+                            neighbor_embeds.unsqueeze(0)              # (1, N, H)
+                        )  # -> (1, 1, H)
+                        fused = attn_out.squeeze(0).squeeze(0)       # (H,)
+                    embeds.append(fused)
+
+                agent_with_neighbor_embeds.append(torch.stack(embeds))  # (num_agents, H)
+
+            batch_enc = agent_with_neighbor_embeds  # now each agent has its own encoding with neighbors considered
+
         #### ---------------------------------------------------------------- ##
         #### 2.  Build pair encodings + utility head for each episode
         #### ---------------------------------------------------------------- ##
@@ -144,6 +186,17 @@ class QNetwork(nn.Module):
         return pair_enc_per_ep, qvals_per_ep
 
 
+class GroupAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads=1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
+    def forward(self, x):
+        # x: (seq_len, batch, embed_dim) -- for each group, batch=1
+        x = x.unsqueeze(1)  # (seq_len, 1, embed_dim)
+        out, _ = self.attn(x, x, x)
+        return out.mean(dim=0)  # (1, embed_dim) mean over seq
+
+
 # %% Joint Q-Network
 class QJoint(nn.Module):
     def __init__(self):
@@ -151,6 +204,8 @@ class QJoint(nn.Module):
 
         self.hid = LATENT_DIM
         self.in_dim = self.hid * 2 + 2        # encA ⊕ encB ⊕ one-hot
+
+        self.group_attn = GroupAttention(self.hid * 2, num_heads=2)
 
         # φ₁  (key1) – encodes each pair
         self.phi1 = nn.Sequential(
@@ -236,8 +291,28 @@ class QJoint(nn.Module):
                     group_index[pair2idx[p]] = g_id
 
             # key1_mean[g] = mean_{p∈g} key1[p]
-            key1_mean = scatter_mean(key1, group_index, dim=0)              # (G_i, H)
+            # key1_mean = scatter_mean(key1, group_index, dim=0)              # (G_i, H)
+            key1_mean = []
+            for g in groups:
+                idxs = [pair2idx[p] for p in g]
+                key1_g = key1[idxs]      # (n_pairs_in_group, H)
 
+                # DELETE
+                # print("shape of key1_g:", key1_g.shape)
+                # if key1_g.shape[0] == 1:
+                #     print("shape of key1_g:", key1_g.shape)
+                #     print("key1_g:", key1_g)
+                    
+                group_repr = self.group_attn(key1_g)  # (1, H)
+
+                # DELETE
+                # if key1_g.shape[0] == 1:
+                #     print("group_repr:", group_repr)
+
+                key1_mean.append(group_repr.squeeze(0))
+            key1_mean = torch.stack(key1_mean, dim=0)  # (G_i, H)
+
+            # DELETE
             # if len(groups) > 1:
             #     print("groups from Qjoint:", groups)
             #     print("group_index:", group_index)
@@ -258,10 +333,6 @@ class QJoint(nn.Module):
             #
             k2            = key2                                             # (P_i, 2H)
 
-            # OLD (DELETE) - wrong calculation of k1/|g|
-            # k1_div_len_g  = key1 / scatter_mean(torch.ones_like(key1),
-            #                                     group_index, dim=0)[group_index]  # (P_i,H)
-            
             counts = scatter_sum(torch.ones(len(pairs), device=key1.device),
                                 group_index, dim=0)          # → (G_i,)
             # expand counts back to per-pair
@@ -277,11 +348,6 @@ class QJoint(nn.Module):
             kbar1         = key1_mean[group_index]                           # (P_i, H)
             alt_val       = k2 + kbar1 - k1_div_len_g                        # (P_i,2H)  (2H if φ₂ expects that)
             alt_q         = self.phi2(alt_val)                               # (P_i, 2)
-
-            # OLD (DELETE) - wrong split
-            # # reorganise alt_q into (G_i, n_pairs_in_g, 2) for convenience
-            # splits   = [len(g) for g in groups]
-            # alt_per_g = alt_q.split(splits, dim=0)
             
             # reorganise alt_q into (G_i, n_pairs_in_g, 2) by explicit group membership
             # map each pair tuple to its row index
@@ -295,6 +361,7 @@ class QJoint(nn.Module):
             # out_qjt_alt.append(alt_per_g)
 
         return out_qjt, out_qjt_alt 
+
 
 
 # %% Joint V Network
