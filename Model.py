@@ -57,6 +57,7 @@ class QNetwork(nn.Module):
         self.CONCAT = True
 
         self.hid_dim = LATENT_DIM
+        self.num_actions = 3
         self.encoder = Encoder(hid_dim=self.hid_dim)
 
         self.NeighborHeurEncoder = nn.Sequential(
@@ -78,7 +79,7 @@ class QNetwork(nn.Module):
             nn.Linear(self.hid_dim, self.hid_dim),
             nn.LeakyReLU(),
             # nn.Dropout(p=0.2),
-            nn.Linear(self.hid_dim, 3),        # 2 actions
+            nn.Linear(self.hid_dim, self.num_actions),
         )
 
         # New: Neighbor attention module (can use MultiheadAttention)
@@ -164,7 +165,7 @@ class QNetwork(nn.Module):
         for enc_agents, pairs in zip(batch_enc, batch_close_pairs):
             if len(pairs) == 0:        # safety
                 pair_enc_per_ep.append(torch.empty(0, self.hid_dim*2, device=device))
-                qvals_per_ep.append(torch.empty(0, 2, device=device))
+                qvals_per_ep.append(torch.empty(0, self.num_actions, device=device))
                 continue
 
             # gather encoded agents
@@ -182,7 +183,7 @@ class QNetwork(nn.Module):
                 qvals_per_ep   .append(pair_q)
 
         assert len(qvals_per_ep) == batch_size, f"Expected {batch_size}, got {len(qvals_per_ep)}"
-        assert qvals_per_ep[0].shape[1] == 2, f"Expected {2}, got {qvals_per_ep[0].shape[1]}"
+        assert qvals_per_ep[0].shape[1] == self.num_actions, f"Expected {self.num_actions}, got {qvals_per_ep[0].shape[1]}"
         return pair_enc_per_ep, qvals_per_ep
 
 

@@ -610,5 +610,8 @@ TODO:
 - see if Qjt pred of new samples is accurate
 
 3. train from total order? or just from PBS label and set tie to another class
+__CURRENT__: tmux train_supervise_partialprio
+- most labels are 2 (tie), so accuracy is really high
+- Test label 0: 80 1: 45 2: 6354
 
 
