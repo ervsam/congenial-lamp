@@ -166,7 +166,7 @@ class Environment:
                         assert heur_map[y, x-1] == heur_map[y, x]-1
                         heur[2, y, x] = 1
                     # right
-                    if x < self.grid_map.shape[0]-1 and heur_map[y, x+1] < heur_map[y, x]:
+                    if x < self.grid_map.shape[1]-1 and heur_map[y, x+1] < heur_map[y, x]:
                         assert heur_map[y, x+1] == heur_map[y, x]-1
                         heur[3, y, x] = 1
         return heur

@@ -258,8 +258,6 @@ while steps < TRAIN_STEPS:
     old_start, old_goals = copy.deepcopy(new_start), copy.deepcopy(new_goals)
     obs_fovs = env.get_obs().to(device)
     neighbor_features = env.get_neighbor_goal_heuristics_as_patches()
-    # WRONG (DELETE)
-    # neighbor_features = [fov.to(device) for patches in neighbor_features for fov in patches]
     flat = [n for n_i in neighbor_features for n in n_i]
     if flat:
         stacked = torch.stack(flat).to(device)

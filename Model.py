@@ -129,10 +129,13 @@ class QNetwork(nn.Module):
 
 
         # ----- Encode neighbor patches -----
-        # batch_neighbor_patches: list of (num_agents, num_neighbors, C, F, F)
+        # batch_neighbor_patches: list(b, num_agents, tensor(num_neighbors, C, F, F))
         if batch_neighbor_patches is not None:
             agent_with_neighbor_embeds = []
             for enc_agents, neighbor_patches in zip(batch_enc, batch_neighbor_patches):
+                assert len(enc_agents) == len(neighbor_patches), \
+                    f"Expected {len(enc_agents)}, got {len(neighbor_patches)}"
+                
                 embeds = []
                 for i, agent_embed in enumerate(enc_agents):
                     # neighbor_patches[i]: (num_neighbors, C, F, F)

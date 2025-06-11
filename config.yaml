@@ -51,7 +51,7 @@ warehouse_2:
     USE_CURRICULUM: False
 
   paths:
-    results: "warehouse_2_supervise/"
+    results: "warehouse_2_neighborview/"
     map_file: "maps/warehouse_2/grid_map.npy"
     heur_file: "maps/warehouse_2/heuristic.npy"
     goals_locs: "maps/warehouse_2/goal_options.npy"

@@ -221,7 +221,7 @@ class SafeGraph:
 def sample_priorities(env, logger, close_pairs, preds, policy='random', epsilon=0.1):
     MAX_TRIES_RESOLVE_CYCLE = 3*len(env.get_close_pairs())
 
-    # Sample an praction based on the probabilities
+    # Sample an action based on the probabilities
     probs = F.softmax(preds, dim=1)
     if policy == 'stochastic':
         actions = torch.multinomial(probs, 1)
@@ -574,7 +574,7 @@ def low_level_search(start, goals, grid, constraints, agent_id, window_size, max
                             conflict = True
                             break
                         # Also check reverse edge for wait actions being misinterpreted as conflicts
-                        if c['edge'] == (neighbor, current) and c['time'] == g + 1:
+                        if c['edge'] == (current, neighbor) and c['time'] == g + 1:
                             conflict = True
                             break
 

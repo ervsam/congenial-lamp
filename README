@@ -611,4 +611,34 @@ TODO:
 
 3. train from total order? or just from PBS label and set tie to another class
 
+## 7 JUN 2025
+2. tmux train_neighbor to warehouse_2_neighborview
+- loss is not decreasing
+- Qjt prediction most is the same, because of the attention layer? if they are neighbors then the value becomes the same?
+- overfit test: model loss is able to converge to 0
 
+## 9 JUN 2025
+for wed meeting
+1. show limit for all the algorithms
+2. and show result for max num agents where all algos can solve, runtime and throughput
+3. and for max num agents for each algos too
+
+1. use num of collision for PBS, and should scale up since should run faster?
+2. then can use sum of cost and num of collisions etc. as features for ML to choose node to expand
+
+
+
+1. check pbs partial order and total order of cpp code matches with python pbs by printing the start and goals from cpp code and running it on python pbs
+
+
+1. bugs found by codex
+- utils.py:
+if c['edge'] == (neighbor, current) and c['time'] == g + 1:
+to
+if c['edge'] == (current, neighbor) and c['time'] == g + 1:
+
+- Environment.py
+# right
+if x < self.grid_map.shape[0]-1 and heur_map[y, x+1] < heur_map[y, x]:
+to
+if x < self.grid_map.shape[1]-1 and heur_map[y, x+1] < heur_map[y, x]:
