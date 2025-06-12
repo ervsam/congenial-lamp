@@ -93,11 +93,13 @@ class Environment:
 
         # generate heuristic map
         if heuristic_map_file and os.path.exists(os.path.join(os.path.dirname(__file__), heuristic_map_file)):
-            logger.print("Environment.__init__: loading heuristic map from file")
-            self.heuristic_map = np.load(root+heuristic_map_file, allow_pickle=True).item()
+            if logger:
+                logger.print("Environment.__init__: loading heuristic map from file")
+                self.heuristic_map = np.load(root+heuristic_map_file, allow_pickle=True).item()
         else:
             self.heuristic_map = self._get_heuristic_map()
-            np.save(root+heuristic_map_file, self.heuristic_map)
+            if heuristic_map_file:
+                np.save(root + heuristic_map_file, self.heuristic_map)
 
         # FOR WHEN USING TRAINED MODEL
         self.use_QTRAN = True
@@ -137,7 +139,8 @@ class Environment:
                 # find length from shortest path from all other cells using A*
                 if self.grid_map[y, x] == 1:
                     continue
-                self.logger.print("Environment.__init__: find shortest distance from", (y, x), "to all other cells")
+                if self.logger:
+                    self.logger.print("Environment.__init__: find shortest distance from", (y, x), "to all other cells")
                 heuristic_map[(y, x)] = np.zeros((self.size_y+2, self.size_x+2))
                 for y2 in range(self.size_y+2):
                     for x2 in range(self.size_x+2):
@@ -301,8 +304,9 @@ class Environment:
                     edge = ((path[t][0], path[t][1], path[t][2]), (path[t+1][0], path[t+1][1], path[t+1][2]))
                     self.edge_constraints[edge] = agent
             except IndexError:
-                self.logger.print("IndexError: path is too short")
-                self.logger.print(path)
+                if self.logger:
+                    self.logger.print("IndexError: path is too short")
+                    self.logger.print(path)
 
         # update the starts and goals
         for agent, path, opt_path in zip(priorities, temp_paths, temp_opt_paths):

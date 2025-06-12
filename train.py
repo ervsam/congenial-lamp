@@ -86,7 +86,7 @@ is_logged = {
 logger = Logger(os.path.join(log_path, "log.txt"))
 logger.print('[torch] using', device)
 
-buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE, freeze=False)
+buffer = PrioritizedReplayBuffer(capacity=BUFFER_SIZE, freeze=True)
 # buffer = ReplayBuffer(buffer_size=BUFFER_SIZE)
 
 throughput = []
@@ -261,6 +261,7 @@ while steps < TRAIN_STEPS:
     flat = [n for n_i in neighbor_features for n in n_i]
     if flat:
         stacked = torch.stack(flat).to(device)
+        print("Neighbor features stacked:", stacked.shape)
         idx = 0
         rebuilt = []
         for agent in neighbor_features:
@@ -273,6 +274,7 @@ while steps < TRAIN_STEPS:
             else:
                 rebuilt.append(torch.stack(agent_rebuilt))
         neighbor_features = rebuilt
+        print("Neighbor features:", len(neighbor_features))
     close_pairs = env.get_close_pairs()
 
     if close_pairs == []:
@@ -407,6 +409,7 @@ while steps < TRAIN_STEPS:
             for enc in pair_enc:
                 tmp += enc
             pair_enc = torch.stack(tmp)
+            print("Pair enc shape:", pair_enc.shape)
             batch_onehot_actions = F.one_hot(actions, num_classes=2).view(-1, 2).float()
             batch_onehot_actions = batch_onehot_actions.to(device)
             batch_pair_enc_action = torch.concat([pair_enc, batch_onehot_actions], dim=1)

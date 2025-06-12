@@ -513,6 +513,7 @@ class Node:
         self.constraints = set()  # Constraints on agents
         self.priority_order = set()  # Partial order of agent priorities
         self.cost = float('inf')  # Cost of the plan
+        self.conflicts = []
 
 def low_level_search(start, goals, grid, constraints, agent_id, window_size, max_time=100):
     """A* search for a single agent that respects constraints."""
@@ -558,17 +559,15 @@ def low_level_search(start, goals, grid, constraints, agent_id, window_size, max
         # Expand neighbors
         for neighbor in get_neighbors(current):
             conflict = False
-
             for c in constraints:
                 if c['agent'] != agent_id:
+                    # Check for vertex conflict
                     if c['type'] == 'vertex':
-                        # Check for vertex conflict
                         if c['pos'] == neighbor and c['time'] == g + 1:
                             conflict = True
                             break
+                    # Check for edge conflict
                     elif c['type'] == 'edge':
-                        # Check for edge conflict
-                        
                         # if current != neighbor:
                         if c['edge'] == (neighbor, current) and c['time'] == g + 1:
                             conflict = True
@@ -613,6 +612,56 @@ def detect_collision(plan, window_size):
 
     return None  # No collisions detected
 
+def detect_collision_pair(plan, agent1, agent2, window_size):
+    """
+    Check for the first conflict between two agents in the plan.
+    Returns a conflict dict if found, otherwise None.
+    """
+    path1 = plan[agent1]
+    path2 = plan[agent2]
+    max_t = min(len(path1), len(path2), window_size + 1)
+
+    for t in range(max_t):
+        # Vertex conflict
+        if path1[t] == path2[t]:
+            return {
+                'type': 'vertex',
+                'time': t,
+                'pos': path1[t],
+                'agents': [agent1, agent2],
+            }
+        # Edge conflict (swap)
+        if t < max_t - 1:
+            if path1[t] == path2[t+1] and path2[t] == path1[t+1]:
+                return {
+                    'type': 'edge',
+                    'time': t + 1,
+                    'edge': (path1[t], path1[t+1]),
+                    'agents': [agent1, agent2],
+                }
+    return None
+
+def detect_all_collisions(plan, window_size):
+    # Returns a list of all collisions (not just the first!)
+    conflicts = []
+    agents = list(plan.keys())
+    for i in range(len(agents)):
+        for j in range(i+1, len(agents)):
+            c = detect_collision_pair(plan, agents[i], agents[j], window_size)
+            if c:
+                conflicts.append(c)
+    return conflicts
+
+def detect_conflicts_for_agent(plan, agent, window_size):
+    conflicts = []
+    for other_agent in plan.keys():
+        if other_agent == agent:
+            continue
+        c = detect_collision_pair(plan, agent, other_agent, window_size)
+        if c:
+            conflicts.append(c)
+    return conflicts
+
 def get_sub_order(agent, priority_order, lower=True):
     """
     Given an agent and a set of pairwise constraints (priority_order),
@@ -654,23 +703,16 @@ def update_plan(node, agent_id, grid, starts, goals, window_size):
 
     # LIST ← topological sorting on partially ordered set ({i} ∪ {j|i ≺N j}, ≺≺≺N )
     higher_than_agent = get_sub_order(agent_id, node.priority_order, lower=False)
-    lower_than_agent = get_sub_order(agent_id, node.priority_order, lower=True)
+    print(f"higher_than_agent {agent_id}", higher_than_agent)
 
-    try:
-        sorted_agents = topological_sort_pbs(graph)
-    except ValueError:
-        return False  # Cyclic dependency in priorities
-    
     dynamic_constraints = dict()
     edge_constraints = dict()
 
     for higher_agent in higher_than_agent:
         higher_agent_path = node.plan[higher_agent]
-
         for t, pos in enumerate(higher_agent_path):
             if t > window_size:
                 break
-
             y, x = pos
             dynamic_constraints[(y, x, t)] = higher_agent
             # add edge constraints (only add the first window elements)
@@ -678,30 +720,16 @@ def update_plan(node, agent_id, grid, starts, goals, window_size):
                 y_2, x_2 = higher_agent_path[t+1]
                 edge = ((y, x, t), (y_2, x_2, t+1))
                 edge_constraints[edge] = higher_agent
+
+    print(f"Updating plan for agent {agent_id}")
+
+    # Perform low-level search for the current agent
+    path = space_time_astar(np.array(grid), starts[agent_id], goals[agent_id][:window_size], dynamic_constraints, edge_constraints)
     
-    lower_priority_agents = sorted_agents[sorted_agents.index(agent_id):]
-
-    for agent in lower_priority_agents:
-        if agent == agent_id or agent in lower_than_agent:
-            # Perform low-level search for the current agent
-            path = space_time_astar(np.array(grid), starts[agent], goals[agent][:window_size], dynamic_constraints, edge_constraints)
-            
-            if path is None:
-                return False  # No solution found for the current agent
-
-            mod_path = [(x, y) for (x, y, t) in path]
-
-            node.plan[agent] = mod_path
-
-            for y, x, t in path:
-                if t > window_size:
-                    break
-                dynamic_constraints[(y, x, t)] = agent
-
-                if t < window_size:
-                    y_2, x_2, _ = path[t+1]
-                    edge = ((y, x, t), (y_2, x_2, t+1))
-                    edge_constraints[edge] = agent
+    if path is None:
+        return False  # No solution found for the current agent
+    mod_path = [(x, y) for (x, y, t) in path]
+    node.plan[agent_id] = mod_path
 
     return True
 
@@ -732,6 +760,47 @@ def topological_sort_pbs(graph):
     else:
         raise ValueError("Graph has a cycle and cannot be topologically sorted.")
 
+def is_reachable(priorities, src, dst):
+    """Check if there is a directed path from src to dst in priorities."""
+    # priorities is a set of (a, b): a has higher priority than b
+    graph = {}
+    for a, b in priorities:
+        if a not in graph:
+            graph[a] = set()
+        graph[a].add(b)
+    # BFS or DFS to check reachability
+    stack = [src]
+    visited = set()
+    while stack:
+        node = stack.pop()
+        if node == dst:
+            return True
+        if node in visited:
+            continue
+        visited.add(node)
+        stack.extend(graph.get(node, []))
+    return False
+
+def find_replan_agents(conflicts, priorities):
+    """
+    Determine all agents who need to be replanned after agent is updated.
+    """
+    # Set of agents to replan, start with the input agent
+    replan = set()
+    changed = True
+
+    while changed:
+        changed = False
+        for conflict in conflicts:
+            a1, a2 = conflict['agents'][:2]
+            # Priority order check (just like C++: if a1 before a2, a2 needs replan, etc.)
+            if is_reachable(priorities, a1, a2) and a2 not in replan:
+                replan.add(a2)
+                changed = True
+            elif is_reachable(priorities, a2, a1) and a1 not in replan:
+                replan.add(a1)
+                changed = True
+    return replan
 
 def priority_based_search(grid, starts, goals, window_size, max_time=10000):
     """Main PBS algorithm."""
@@ -750,6 +819,7 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
         root.plan[agent] = path
 
     root.cost = sum(len(path) for path in root.plan.values())
+    root.conflicts = detect_all_collisions(root.plan, window_size)
     stack = [root]
 
     while stack:
@@ -758,23 +828,64 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
             return "No Solution"
         
         node = stack.pop()
-        collision = detect_collision(node.plan, window_size)
 
-        if not collision:
+        # collision = detect_collision(node.plan, window_size)
+        # if not collision:
+        conflicts = detect_all_collisions(node.plan, window_size)
+        if not conflicts:
             return (node.plan, node.priority_order)
 
         new_nodes = []
-        ai, aj = collision['agents'][:2]  # Handle the first collision
+        # ai, aj = collision['agents'][:2]  # Handle the first collision
+        chosen_conflict = min(conflicts, key=lambda c: c['time'])
+        ai, aj = chosen_conflict['agents'][:2]
         for agent in [ai, aj]:
             new_node = Node()
             new_node.plan = dict(node.plan)
             new_node.priority_order = set(node.priority_order)
             new_node.priority_order.add((aj, ai) if agent == ai else (ai, aj))
+            if agent == ai:
+                new_node.priority_order.add((aj, ai))
+            else:
+                new_node.priority_order.add((ai, aj))
 
-            success = update_plan(new_node, agent, grid, starts, goals, window_size)
-            if success:
-                new_node.cost = sum(len(path) for path in new_node.plan.values())
-                new_nodes.append(new_node)
+            print(f"Replanning for agent {agent} due to conflict with agents {chosen_conflict['agents']} at time {chosen_conflict['time']}")
+
+            agents_to_replan = find_replan_agents(conflicts, new_node.priority_order)
+
+            new_node.conflicts = conflicts.copy()
+
+            print("agents_to_replan:", agents_to_replan)
+
+            success = False
+            while agents_to_replan:
+                replan_agent = agents_to_replan.pop()
+                success = update_plan(new_node, replan_agent, grid, starts, goals, window_size)
+                if not success:
+                    break
+
+                print("Updated plan for agent", replan_agent)
+
+                # remove conflicts involving the replan_agent
+                new_node.conflicts = [c for c in new_node.conflicts if replan_agent not in c['agents']]
+
+                # find_conflicts(new_conflicts, a);
+                new_conflicts = detect_conflicts_for_agent(new_node.plan, replan_agent, window_size)
+
+                # 2. Find all agents that need to be replanned due to this conflict
+                # find_replan_agents(node, new_conflicts, replan);
+                agents_to_replan = agents_to_replan.union(find_replan_agents(new_conflicts, new_node.priority_order))
+
+                print(f"agents to replan after updating {replan_agent}: {agents_to_replan}")
+
+                # node->conflicts.splice(node->conflicts.end(), new_conflicts);
+                new_node.conflicts += new_conflicts
+
+            if not success:
+                continue
+
+            new_node.cost = sum(len(path) for path in new_node.plan.values())
+            new_nodes.append(new_node)
 
         # sort non-increasing order of cost
         new_nodes.sort(key=lambda x: x.cost, reverse=True)

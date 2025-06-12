@@ -127,6 +127,7 @@ class QNetwork(nn.Module):
         # split back – tuple of tensors, one per episode
         batch_enc = torch.split(flat_encoded_obs, num_agents_list, dim=0)   # B × (N_i, H)
 
+        print("batch_enc shape:", len(batch_enc), batch_enc[0].shape)
 
         # ----- Encode neighbor patches -----
         # batch_neighbor_patches: list(b, num_agents, tensor(num_neighbors, C, F, F))
@@ -139,11 +140,19 @@ class QNetwork(nn.Module):
                 embeds = []
                 for i, agent_embed in enumerate(enc_agents):
                     # neighbor_patches[i]: (num_neighbors, C, F, F)
+                    num_neighbors = neighbor_patches[i].shape[0]
+
                     if neighbor_patches[i].shape[0] == 0:
                         # No neighbors: fallback to agent's own encoding
                         fused = agent_embed
                     else:
+                        assert neighbor_patches[i].shape[1:] == (1, 11, 11), \
+                            f"Expected (1, 11, 11), got {neighbor_patches[i].shape[1:]}"
+                        
                         neighbor_embeds = self.NeighborHeurEncoder(neighbor_patches[i].to(device))  # (num_neighbors, 64)
+
+                        assert neighbor_embeds.shape == (num_neighbors, self.hid_dim), \
+                            f"Expected ({num_neighbors}, {self.hid_dim}), got {neighbor_embeds.shape}"
 
                         # Attention: Query = agent, Key/Value = neighbors
                         attn_out, _ = self.neighbor_attn(
@@ -157,6 +166,9 @@ class QNetwork(nn.Module):
                 agent_with_neighbor_embeds.append(torch.stack(embeds))  # (num_agents, H)
 
             batch_enc = agent_with_neighbor_embeds  # now each agent has its own encoding with neighbors considered
+        
+        print("agent_with_neighbor_embeds shape:", len(batch_enc), batch_enc[0].shape)
+
 
         #### ---------------------------------------------------------------- ##
         #### 2.  Build pair encodings + utility head for each episode

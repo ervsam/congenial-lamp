@@ -627,7 +627,6 @@ for wed meeting
 2. then can use sum of cost and num of collisions etc. as features for ML to choose node to expand
 
 
-
 1. check pbs partial order and total order of cpp code matches with python pbs by printing the start and goals from cpp code and running it on python pbs
 
 
@@ -642,3 +641,9 @@ if c['edge'] == (current, neighbor) and c['time'] == g + 1:
 if x < self.grid_map.shape[0]-1 and heur_map[y, x+1] < heur_map[y, x]:
 to
 if x < self.grid_map.shape[1]-1 and heur_map[y, x+1] < heur_map[y, x]:
+
+## meeting:
+1. use prediction as initial partial priority
+
+## 11 JUN 2025
+1. PBS same between cpp and python?
