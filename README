@@ -647,3 +647,6 @@ if x < self.grid_map.shape[1]-1 and heur_map[y, x+1] < heur_map[y, x]:
 
 ## 11 JUN 2025
 1. PBS same between cpp and python?
+
+## 13 JUN 2025
+1. predict partial order and run pbs

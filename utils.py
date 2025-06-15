@@ -703,7 +703,7 @@ def update_plan(node, agent_id, grid, starts, goals, window_size):
 
     # LIST ← topological sorting on partially ordered set ({i} ∪ {j|i ≺N j}, ≺≺≺N )
     higher_than_agent = get_sub_order(agent_id, node.priority_order, lower=False)
-    print(f"higher_than_agent {agent_id}", higher_than_agent)
+    # print(f"higher_than_agent {agent_id}", higher_than_agent)
 
     dynamic_constraints = dict()
     edge_constraints = dict()
@@ -721,7 +721,7 @@ def update_plan(node, agent_id, grid, starts, goals, window_size):
                 edge = ((y, x, t), (y_2, x_2, t+1))
                 edge_constraints[edge] = higher_agent
 
-    print(f"Updating plan for agent {agent_id}")
+    # print(f"Updating plan for agent {agent_id}")
 
     # Perform low-level search for the current agent
     path = space_time_astar(np.array(grid), starts[agent_id], goals[agent_id][:window_size], dynamic_constraints, edge_constraints)
@@ -829,8 +829,6 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
         
         node = stack.pop()
 
-        # collision = detect_collision(node.plan, window_size)
-        # if not collision:
         conflicts = detect_all_collisions(node.plan, window_size)
         if not conflicts:
             return (node.plan, node.priority_order)
@@ -849,13 +847,13 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
             else:
                 new_node.priority_order.add((ai, aj))
 
-            print(f"Replanning for agent {agent} due to conflict with agents {chosen_conflict['agents']} at time {chosen_conflict['time']}")
+            # print(f"Replanning for agent {agent} due to conflict with agents {chosen_conflict['agents']} at time {chosen_conflict['time']}")
 
             agents_to_replan = find_replan_agents(conflicts, new_node.priority_order)
 
             new_node.conflicts = conflicts.copy()
 
-            print("agents_to_replan:", agents_to_replan)
+            # print("agents_to_replan:", agents_to_replan)
 
             success = False
             while agents_to_replan:
@@ -864,7 +862,7 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
                 if not success:
                     break
 
-                print("Updated plan for agent", replan_agent)
+                # print("Updated plan for agent", replan_agent)
 
                 # remove conflicts involving the replan_agent
                 new_node.conflicts = [c for c in new_node.conflicts if replan_agent not in c['agents']]
@@ -876,7 +874,7 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
                 # find_replan_agents(node, new_conflicts, replan);
                 agents_to_replan = agents_to_replan.union(find_replan_agents(new_conflicts, new_node.priority_order))
 
-                print(f"agents to replan after updating {replan_agent}: {agents_to_replan}")
+                # print(f"agents to replan after updating {replan_agent}: {agents_to_replan}")
 
                 # node->conflicts.splice(node->conflicts.end(), new_conflicts);
                 new_node.conflicts += new_conflicts

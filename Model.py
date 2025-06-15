@@ -127,7 +127,7 @@ class QNetwork(nn.Module):
         # split back – tuple of tensors, one per episode
         batch_enc = torch.split(flat_encoded_obs, num_agents_list, dim=0)   # B × (N_i, H)
 
-        print("batch_enc shape:", len(batch_enc), batch_enc[0].shape)
+        # print("batch_enc shape:", len(batch_enc), batch_enc[0].shape)
 
         # ----- Encode neighbor patches -----
         # batch_neighbor_patches: list(b, num_agents, tensor(num_neighbors, C, F, F))
@@ -167,7 +167,7 @@ class QNetwork(nn.Module):
 
             batch_enc = agent_with_neighbor_embeds  # now each agent has its own encoding with neighbors considered
         
-        print("agent_with_neighbor_embeds shape:", len(batch_enc), batch_enc[0].shape)
+        # print("agent_with_neighbor_embeds shape:", len(batch_enc), batch_enc[0].shape)
 
 
         #### ---------------------------------------------------------------- ##

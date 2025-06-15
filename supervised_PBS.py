@@ -14,21 +14,21 @@ import pdb
 # --- Configurations ---
 CONFIG_NAME = "warehouse_2"
 CONFIG_FILE = "config.yaml"
-DEVICE = "cuda:6" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda:2" if torch.cuda.is_available() else "cpu"
 BATCH_SIZE = 64
 LR = 1e-3
 EPOCHS = 30
 N_SAMPLES = 100000
 
 use_neighbor_features = True
-model_file = "supervised_pbs_model_best_neigh_120.pth"
+model_file = "supervised_pbs_model_best_neigh_80.pth"
 label_idx = 3
 
 # --- Load or Generate Dataset ---
 dataset = []
-dataset_path = 'supervised_pbs_dataset_neigh_120.pkl'
+dataset_path = 'supervised_pbs_dataset_neigh_80.pkl'
 EPOCHS_PER_CYCLE = 3     # Train for 3 epochs each time you add new samples
-CYCLE_SIZE = 100
+CYCLE_SIZE = 500
 best_acc = 0
 epoch_counter = 0
 
