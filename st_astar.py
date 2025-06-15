@@ -87,7 +87,7 @@ def space_time_astar(grid, start, goals, dynamic_constraints, edge_constraints, 
 
         closed_list.add((current_node.x, current_node.y, current_node.t))
 
-        actions = [(0, 0), (0, 1), (1, 0), (0, -1), (-1, 0)]
+        actions = [(0, 1), (-1, 0), (0, -1), (1, 0), (0, 0)]
         for dx, dy in actions:
             new_x = current_node.x + dx
             new_y = current_node.y + dy
