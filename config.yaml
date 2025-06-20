@@ -33,7 +33,7 @@ warehouse_2:
 
   environment:
     NUM_AGENTS: 70
-    FOV: 11
+    FOV: 21
     WINDOW_SIZE: 5
   
   training:

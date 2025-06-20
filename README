@@ -186,7 +186,7 @@ b. train from very small number of agents first
 ## 24 APR 2025
 1. debug, start from small scenarios, confirm that model is working
 
-2. how is Ltd calculated for QTRAN-alt? theres a Qjt term for each agent?
+                lculated for QTRAN-alt? theres a Qjt term for each agent?
 
 ## 29 APR 2025
 1. confirmed that model is able to converge on overfit test
@@ -615,3 +615,20 @@ __CURRENT__: tmux train_supervise_partialprio
 - Test label 0: 80 1: 45 2: 6354
 
 
+## 13 JUN 2025
+1. predict partial order and run pbs
+
+## 17 JUN 2025
+GOAL:
+1. decrease the number of nodes expanded
+    - accurate partial priorities assigned from the start
+
+
+sanity check: if i assign the correct pbs prio from the start, num of nodes expanded should be 0
+checked
+
+1. train 3 class model, with balanced class
+
+
+## meet
+1. check runtime of model prediction

@@ -27,6 +27,7 @@ class Encoder(nn.Module):
     def __init__(self, hid_dim: int = LATENT_DIM):
         super().__init__()
         self.layers = 7          # image channels
+        self.fov = 21
 
         self.conv = nn.Sequential(
             nn.Conv2d(self.layers, 32, 3, padding=1),
@@ -38,7 +39,7 @@ class Encoder(nn.Module):
             nn.Conv2d(32, 16, 1), 
             nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(16*11*11, hid_dim),
+            nn.Linear(16*self.fov*self.fov, hid_dim),
             nn.LeakyReLU()
         )
         self.coord_fc = nn.Linear(2, 64)
@@ -52,11 +53,12 @@ class Encoder(nn.Module):
 
 # %% Q-Network (agent utility network)
 class QNetwork(nn.Module):
-    def __init__(self):
+    def __init__(self, fov):
         super(QNetwork, self).__init__()
         self.CONCAT = True
 
         self.hid_dim = LATENT_DIM
+        self.fov = fov
         self.num_actions = 3
         self.encoder = Encoder(hid_dim=self.hid_dim)
 
@@ -66,7 +68,7 @@ class QNetwork(nn.Module):
             nn.Conv2d(8, 4, 3, padding=1),
             nn.LeakyReLU(),
             nn.Flatten(),
-            nn.Linear(4 * 11 * 11, self.hid_dim),
+            nn.Linear(4 * self.fov * self.fov, self.hid_dim),
             nn.LeakyReLU()
         )
 
@@ -90,100 +92,108 @@ class QNetwork(nn.Module):
                 batch_close_pairs: list[list[tuple[int,int]]],
                 batch_neighbor_patches: list[list[torch.Tensor]] = None,  # list of (num_agents, num_neighbors, C, F, F)
             ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """
-        Parameters
-        ----------
-        batch_obs
-            List of length B.  obs_i has shape (N_i, C, F, F).
-            The **last** input channel is assumed to hold the (x,y) coordinates.
-        batch_close_pairs
-            Same length (B).  Each element is a list of (a,b) index pairs
-            referring to the agents in that episode.
-
-        Returns
-        -------
-        n_pair_enc    - list length B, each item is (n_pairs_i, 2*H)            # encoder outputs per pair
-        batch_qvals   - list length B, each item is (n_pairs_i, 2)              # utility Q-values per pair
-        """
 
         #### ---------------------------------------------------------------- ##
         #### 0.  Episode-level bookkeeping
         #### ---------------------------------------------------------------- ##
         device   = batch_obs[0].device
         batch_size = len(batch_obs)
-        num_agents_list = [obs.shape[0] for obs in batch_obs]       # e.g. [4,6,5,…]
+        hid_dim = self.hid_dim
 
         #### ---------------------------------------------------------------- ##
         #### 1.  Flatten → encode every agent once
         #### ---------------------------------------------------------------- ##
-        fov_flat, coord_flat = [], []
-        for obs in batch_obs:
-            fov_flat.append(obs[:, :-1])             # (N_i, C-1, F, F)
-            coord_flat.append(obs[:, -1, 0, 0:2])    # (N_i, 2)
-        batch_obs   = torch.cat(fov_flat,   0).to(device)    # (ΣN_i, C-1, F, F)
-        batch_coordinates = torch.cat(coord_flat, 0).to(device)    # (ΣN_i, 2)
+        # batch_obs: batch_size, 2, C, F, F
+        batch_obs = batch_obs.view(batch_size*2, 8, self.fov, self.fov)
 
-        flat_encoded_obs   = self.encoder(batch_obs, batch_coordinates)     # (ΣN_i, H)
+        batch_coordinates = batch_obs[:, -1, 0, 0:2]    # (ΣN_i, 2)
+        assert batch_coordinates.shape == (batch_size*2, 2), f"Expected {(batch_size*2, 2)}, got {batch_coordinates.shape}"
 
-        # split back – tuple of tensors, one per episode
-        batch_enc = torch.split(flat_encoded_obs, num_agents_list, dim=0)   # B × (N_i, H)
+        batch_obs = batch_obs[:, :-1]    # (ΣN_i, C-1, F, F)
+        assert batch_obs.shape == (batch_size*2, 7, self.fov, self.fov), f"Expected {(batch_size*2, 7, self.fov, self.fov)}, got {batch_obs.shape}"
 
+        batch_enc   = self.encoder(batch_obs, batch_coordinates)     # (batch_size*2, h)
+        assert batch_enc.shape == (batch_size*2, hid_dim)
 
-        # ----- Encode neighbor patches -----
-        # batch_neighbor_patches: list of (num_agents, num_neighbors, C, F, F)
+        # ----- Encode neighbor patches (batched across all episodes and agents) -----
         if batch_neighbor_patches is not None:
-            agent_with_neighbor_embeds = []
-            for enc_agents, neighbor_patches in zip(batch_enc, batch_neighbor_patches):
-                embeds = []
-                for i, agent_embed in enumerate(enc_agents):
-                    # neighbor_patches[i]: (num_neighbors, C, F, F)
-                    if neighbor_patches[i].shape[0] == 0:
-                        # No neighbors: fallback to agent's own encoding
-                        fused = agent_embed
-                    else:
-                        neighbor_embeds = self.NeighborHeurEncoder(neighbor_patches[i].to(device))  # (num_neighbors, 64)
+            # Flatten all agent embeddings, all neighbors, and store mapping
+            total_agents = len(batch_enc)
 
-                        # Attention: Query = agent, Key/Value = neighbors
-                        attn_out, _ = self.neighbor_attn(
-                            agent_embed.unsqueeze(0).unsqueeze(0),    # (1, 1, H)
-                            neighbor_embeds.unsqueeze(0),             # (1, N, H)
-                            neighbor_embeds.unsqueeze(0)              # (1, N, H)
-                        )  # -> (1, 1, H)
-                        fused = attn_out.squeeze(0).squeeze(0)       # (H,)
-                    embeds.append(fused)
+            all_neighbor_patches = []
+            neighbor_lens = []    # number of neighbors per agent
+            for neighbor_patches in batch_neighbor_patches:
+                patches_1 = neighbor_patches[0].to(device)
+                neighbor_lens.append(len(patches_1))
+                all_neighbor_patches.append(patches_1)
 
-                agent_with_neighbor_embeds.append(torch.stack(embeds))  # (num_agents, H)
+                patches_2 = neighbor_patches[1].to(device)
+                neighbor_lens.append(len(patches_2))
+                all_neighbor_patches.append(patches_2)
 
-            batch_enc = agent_with_neighbor_embeds  # now each agent has its own encoding with neighbors considered
+            # Pad neighbor lists to max_neighbors and stack
+            max_neighbors = max(neighbor_lens)
+            padded_neighbors = []
+            for patches in all_neighbor_patches:
+                n = len(patches)
+                if n < max_neighbors:
+                    pad = torch.zeros((max_neighbors - n, 1, self.fov, self.fov), device=device)
+                    padded_neighbors.append(torch.cat([patches, pad], dim=0))
+                else:
+                    padded_neighbors.append(patches)
+            # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
+            all_neighbors_tensor = torch.stack(padded_neighbors, dim=0)
+            assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov)
 
+            # Flatten for CNN: (total_agents * max_neighbors, 1, self.fov, self.fov)
+            flat_neighbors = all_neighbors_tensor.view(-1, 1, self.fov, self.fov)
+            neighbor_embeds = self.NeighborHeurEncoder(flat_neighbors)  # (total_agents * max_neighbors, hid_dim)
+            neighbor_embeds = neighbor_embeds.view(total_agents, max_neighbors, hid_dim)
+
+            all_agent_embeds_tensor = batch_enc  # (total_agents, hid_dim)
+
+            # ----------- Build mask for attention -------------
+            mask = torch.zeros((total_agents, max_neighbors), dtype=torch.bool, device=device)
+            for i, n in enumerate(neighbor_lens):
+                if n < max_neighbors:
+                    mask[i, n:] = True
+
+            # ----------- Batched attention for all agents -------------
+            agent_embed_q = all_agent_embeds_tensor.unsqueeze(1)          # (total_agents, 1, H)
+            assert agent_embed_q.shape == (batch_size*2, 1, hid_dim)
+            neighbor_embeds_kv = neighbor_embeds                          # (total_agents, max_neighbors, H)
+            assert neighbor_embeds_kv.shape == (batch_size*2, max_neighbors, hid_dim)
+
+            attn_out, _ = self.neighbor_attn(
+                agent_embed_q,
+                neighbor_embeds_kv,
+                neighbor_embeds_kv,
+                key_padding_mask=mask
+            )  # (total_agents, 1, H)
+            fused_embeds = attn_out.squeeze(1)  # (total_agents, H)
+            assert fused_embeds.shape == (batch_size*2, hid_dim)
+
+            # Optionally set n=0 agents to their own embedding
+            for i, n in enumerate(neighbor_lens):
+                if n == 0:
+                    fused_embeds[i] = all_agent_embeds_tensor[i]
+
+            batch_enc = fused_embeds
+
+        assert batch_enc.shape == (batch_size*2, hid_dim)
+        
         #### ---------------------------------------------------------------- ##
         #### 2.  Build pair encodings + utility head for each episode
         #### ---------------------------------------------------------------- ##
-        pair_enc_per_ep : list[torch.Tensor] = []
-        qvals_per_ep    : list[torch.Tensor] = []
 
-        for enc_agents, pairs in zip(batch_enc, batch_close_pairs):
-            if len(pairs) == 0:        # safety
-                pair_enc_per_ep.append(torch.empty(0, self.hid_dim*2, device=device))
-                qvals_per_ep.append(torch.empty(0, self.num_actions, device=device))
-                continue
+        # pair_enc = torch.cat([h_a, h_b], dim=-1)     # (n_pairs, 2H)
+        pair_enc_per_ep = batch_enc.view(batch_size, 2 * hid_dim)
 
-            # gather encoded agents
-            idx_a = torch.tensor([p[0] for p in pairs], device=device)
-            idx_b = torch.tensor([p[1] for p in pairs], device=device)
+        # pair_q   = self.qnet(pair_enc)               # (n_pairs, 2)
+        qvals_per_ep = self.qnet(pair_enc_per_ep)
 
-            h_a   = enc_agents[idx_a]               # (n_pairs, H)
-            h_b   = enc_agents[idx_b]               # (n_pairs, H)
-
-            if self.CONCAT:
-                pair_enc = torch.cat([h_a, h_b], dim=-1)     # (n_pairs, 2H)
-                pair_q   = self.qnet(pair_enc)               # (n_pairs, 2)
-
-                pair_enc_per_ep.append(pair_enc)             # store
-                qvals_per_ep   .append(pair_q)
-
-        assert len(qvals_per_ep) == batch_size, f"Expected {batch_size}, got {len(qvals_per_ep)}"
-        assert qvals_per_ep[0].shape[1] == self.num_actions, f"Expected {self.num_actions}, got {qvals_per_ep[0].shape[1]}"
+        # assert len(qvals_per_ep) == batch_size, f"Expected {batch_size}, got {len(qvals_per_ep)}"
+        # assert qvals_per_ep[0].shape[1] == self.num_actions, f"Expected {self.num_actions}, got {qvals_per_ep[0].shape[1]}"
         return pair_enc_per_ep, qvals_per_ep
 
 

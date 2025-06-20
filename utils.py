@@ -342,6 +342,12 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random', epsilon=
 def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsilon=0.1, obs_fovs=None, buffer=None, old_start=None, old_goals=None, neighbor_features=None):    
     USE_PENALTY = False
 
+    result = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size)
+    if result == "No Solution":
+        logger.print("No solution found using PBS, skipping instance\n")
+        env.reset()
+        new_start, new_goals = env.starts, env.goals
+        return None, None, None, new_start, new_goals, throughput
     if q_vals is None:
         priorities = list(range(env.num_agents))
         start_time = time.time()
@@ -350,6 +356,30 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
         if new_start is not None:
             throughput.append(env.goal_reached)
         return None, None, None, new_start, new_goals, throughput
+    else:
+        plan, priority_order = result
+        paths = plan.values()
+
+        graph = defaultdict(list)
+        for agent in range(env.num_agents):
+            graph[agent] = []
+        for a, b in priority_order:
+            graph[a].append(b)
+        priorities = topological_sort_pbs(graph)
+        print("utils.step(): Priority ", priorities)
+
+        start_time = time.time()
+        new_start, new_goals = env.step(priorities)
+        logger.print("Time to env.step:", time.time()-start_time)
+        # assert new_start is not None
+        if new_start is None:
+            logger.print("PBS and PP does not match, skipping instance\n")
+            env.reset()
+            new_start, new_goals = env.starts, env.goals
+            return None, None, None, new_start, new_goals, throughput
+
+        logger.print(f"Solution found using PBS with PBS_epsilon: {pbs_epsilon:.2}\n")
+    return priorities, [0], [0], new_start, new_goals, throughput
 
     close_pairs = env.get_close_pairs()
     
@@ -365,8 +395,6 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
         else:
             plan, priority_order = result
             paths = plan.values()
-            # for i, path in enumerate(paths):
-            #     print(f"Agent {i}: {path}")
 
             graph = defaultdict(list)
             for agent in range(env.num_agents):
@@ -741,17 +769,13 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
         # path to next goal
         # path = low_level_search(start, goals[agent], grid, [], agent, window_size)
         path = space_time_astar(np.array(grid), start, goals[agent][:window_size], dict(), dict())
-
         if path is None:
             return "No Solution"
-        
         path = [(x, y) for (x, y, t) in path]
-
         root.plan[agent] = path
 
     root.cost = sum(len(path) for path in root.plan.values())
     stack = [root]
-
     while stack:
         if time.time() - start_time >= max_time:
             print("MAX PBS TIME REACHED")
@@ -759,7 +783,6 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
         
         node = stack.pop()
         collision = detect_collision(node.plan, window_size)
-
         if not collision:
             return (node.plan, node.priority_order)
 
@@ -770,7 +793,6 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
             new_node.plan = dict(node.plan)
             new_node.priority_order = set(node.priority_order)
             new_node.priority_order.add((aj, ai) if agent == ai else (ai, aj))
-
             success = update_plan(new_node, agent, grid, starts, goals, window_size)
             if success:
                 new_node.cost = sum(len(path) for path in new_node.plan.values())
@@ -779,7 +801,6 @@ def priority_based_search(grid, starts, goals, window_size, max_time=10000):
         # sort non-increasing order of cost
         new_nodes.sort(key=lambda x: x.cost, reverse=True)
         stack.extend(new_nodes)
-
     return "No Solution"
 
 
