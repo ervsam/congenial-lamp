@@ -2,6 +2,7 @@
 /__pycache__/
 /q_net_model/
 /results/
+/runs
 
 
 *.txt

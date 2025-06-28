@@ -623,12 +623,82 @@ GOAL:
 1. decrease the number of nodes expanded
     - accurate partial priorities assigned from the start
 
-
 sanity check: if i assign the correct pbs prio from the start, num of nodes expanded should be 0
 checked
 
 1. train 3 class model, with balanced class
 
-
 ## meet
 1. check runtime of model prediction
+
+## 21 JUN 2025
+1. test set balanced
+
+1. tensorboard, plot train test losses
+done
+
+2. train over more samples, at least 10K per label
+- training
+
+3. i can generate PBS data using RHCR cpp code, i only need to save the (starts, goals, partial prio), then build the fovs in python
+
+## 22 JUN 2025
+1. test model on RHCR
+> training again, saving the best test accuracy model
+
+2. generate PBS data in cpp
+- starts for
+    - surrounding agents
+- goals for
+    - heuristic to goal
+    - DHC heur
+- priority_order for
+    - labels
+
+2. add neighbor coord to encoding
+> training in tmux train_partialprio_neighcoords
+
+## meet
+1. test on random and compare results
+2. test on harder instance where PBS takes longer, (longer planning window)
+
+## 25 JUN 2025
+1. record number of pairs added for different thresholds
+
+- use GPU when predicting in python
+
+TODO: DHC_heur can be precalculated for all cells
+
+## 26 JUN 2025
+1. plot metrics, verify improvement when using model
+- expanded nodes decreased
+
+2. DHC_heur can be precalculated for all cells
+- verifying that the results of 70 agents 40 threshold is the same
+
+get obs: 0.034s
+load model: 0.037s
+- neighbor_features: 0.178s
+preprocess: 0.063s
+inference time: 0.055s
+
+3. test on random and compare results
+- leads to "too many traffic jams" if priorities sampled randomly
+- on threshold 70, it performs about the same as model and PBS, thats because not a lot of pairs are sampled
+- this is a good sign, meaning the pairs cant just be sampled randomly
+> what if i turn off congested() and just let it run?
+
+## 27 JUN 2025
+1. compare for less agents (k=60), so that random_pbs doesnt get congested
+$ train model on 60 agents
+
+- set random_pbs = true; as argument, default false
+
+2. run random_pbs on larger w = 20
+- not congested, unlike w = 5
+- so train model on w = 20
+
+3. train on 70 agents with w = 20
+- to compare with random_pbs w = 20
+$ generate dataset for training
+$ over different agents and planning_window

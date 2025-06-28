@@ -339,23 +339,12 @@ def sample_priorities(env, logger, close_pairs, preds, policy='random', epsilon=
     return priorities, partial_prio, pred_value
 
 
-def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsilon=0.1, obs_fovs=None, buffer=None, old_start=None, old_goals=None, neighbor_features=None):    
-    USE_PENALTY = False
-
+def step(env, logger):    
     result = priority_based_search(env.grid_map, env.starts, env.goals, env.window_size)
     if result == "No Solution":
         logger.print("No solution found using PBS, skipping instance\n")
         env.reset()
-        new_start, new_goals = env.starts, env.goals
-        return None, None, None, new_start, new_goals, throughput
-    if q_vals is None:
-        priorities = list(range(env.num_agents))
-        start_time = time.time()
-        new_start, new_goals = env.step(priorities)
-        logger.print("Time to env.step:", time.time()-start_time)
-        if new_start is not None:
-            throughput.append(env.goal_reached)
-        return None, None, None, new_start, new_goals, throughput
+        return None, None
     else:
         plan, priority_order = result
         paths = plan.values()
@@ -375,11 +364,8 @@ def step(env, logger, throughput, q_vals, policy="random", epsilon=0.1, pbs_epsi
         if new_start is None:
             logger.print("PBS and PP does not match, skipping instance\n")
             env.reset()
-            new_start, new_goals = env.starts, env.goals
-            return None, None, None, new_start, new_goals, throughput
-
-        logger.print(f"Solution found using PBS with PBS_epsilon: {pbs_epsilon:.2}\n")
-    return priorities, [0], [0], new_start, new_goals, throughput
+            return None, None
+    return priorities, priority_order
 
     close_pairs = env.get_close_pairs()
     

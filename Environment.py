@@ -529,34 +529,72 @@ class Environment:
         return obs_fovs
 
     def get_neighbor_goal_heuristics_as_patches(self):
-        """
-        For each agent, returns a list of FOV patches for all its neighbors' goal heuristics.
-        Returns:
-            List[List[Tensor]]: shape (num_agents, num_neighbors_i, C, fov, fov)
-        """
         num_agents = self.num_agents
-        neighbor_features = []
+        fov = self.fov
+        neighbor_features_and_coord = []
+
+        # Precompute padded heuristic maps for all unique goals
+        padded_heur_maps = {}
+        for agent_goals in self.goals:
+            for goal in agent_goals:
+                if goal not in padded_heur_maps:
+                    heur_map = self.heuristic_map[goal]
+                    padded_heur_maps[goal] = np.pad(heur_map, pad_width=fov//2, mode='constant', constant_values=np.inf)
+
         for agent in range(num_agents):
             x, y = self.starts[agent]
             neighbors = self._get_neighboring_agents(agent)
             patches = []
             for neighbor in neighbors:
                 neighbor_goal = self.goals[neighbor][0]
-                heur_map = self.heuristic_map[neighbor_goal]
+                padded_grid = padded_heur_maps[neighbor_goal]
+                heur = padded_grid[x:x+fov, y:y+fov]
 
-                padded_grid = np.pad(heur_map, pad_width=self.fov//2, mode='constant', constant_values=np.inf)
-                heur = padded_grid[x:x+self.fov, y:y+self.fov]
-                # normalize the heuristic map
-                max_val = np.max(heur[heur < np.inf])
+                # Normalize (skip all-inf region)
+                mask = (heur < np.inf)
+                max_val = np.max(heur[mask]) if np.any(mask) else 1.0
                 heur_fov = heur / max_val
+                heur_fov = np.where(np.isinf(heur_fov), 1, heur_fov)
+                heur_fov = torch.from_numpy(heur_fov.astype(np.float32)).unsqueeze(0)  # (1, fov, fov)
+
+                neigh_y, neigh_x = self.starts[neighbor]
+                coord = torch.tensor([neigh_x / self.size_x, neigh_y / self.size_y], dtype=torch.float32)
+                patches.append((heur_fov, coord))
+            neighbor_features_and_coord.append(patches)
+        return neighbor_features_and_coord
+    # OLD (DELETE)
+    # def get_neighbor_goal_heuristics_as_patches(self):
+    #     """
+    #     For each agent, returns a list of FOV patches for all its neighbors' goal heuristics.
+    #     Returns:
+    #         List[List[Tensor]]: shape (num_agents, num_neighbors_i, C, fov, fov)
+    #     """
+    #     num_agents = self.num_agents
+    #     neighbor_features_and_coord = []
+    #     for agent in range(num_agents):
+    #         x, y = self.starts[agent]
+    #         neighbors = self._get_neighboring_agents(agent)
+    #         patches = []
+    #         for neighbor in neighbors:
+    #             neighbor_goal = self.goals[neighbor][0]
+    #             heur_map = self.heuristic_map[neighbor_goal]
+
+    #             padded_grid = np.pad(heur_map, pad_width=self.fov//2, mode='constant', constant_values=np.inf)
+    #             heur = padded_grid[x:x+self.fov, y:y+self.fov]
+    #             # normalize the heuristic map
+    #             max_val = np.max(heur[heur < np.inf])
+    #             heur_fov = heur / max_val
                 
-                # Optionally expand dims to match encoder input shape, e.g., (1, fov, fov)
-                # and to float32 tensor
-                heur_fov = torch.tensor(heur_fov, dtype=torch.float32).unsqueeze(0)
-                heur_fov = torch.where(torch.isinf(heur_fov), torch.tensor(1), heur_fov)
-                patches.append(heur_fov)
-            neighbor_features.append(patches)
-        return neighbor_features
+    #             # Optionally expand dims to match encoder input shape, e.g., (1, fov, fov)
+    #             # and to float32 tensor
+    #             heur_fov = torch.tensor(heur_fov, dtype=torch.float32).unsqueeze(0)
+    #             heur_fov = torch.where(torch.isinf(heur_fov), torch.tensor(1), heur_fov)
+
+    #             neigh_y, neigh_x = self.starts[neighbor]
+    #             coord = torch.tensor([neigh_x / self.size_x, neigh_y / self.size_y], dtype=torch.float32)
+    #             patches.append((heur_fov, coord))
+    #         neighbor_features_and_coord.append(patches)
+    #     return neighbor_features_and_coord
 
 
     def _get_neighboring_agents(self, agent):

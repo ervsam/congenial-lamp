@@ -24,10 +24,10 @@ class ResBlock(nn.Module):
         return x
     
 class Encoder(nn.Module):
-    def __init__(self, hid_dim: int = LATENT_DIM):
+    def __init__(self, fov, hid_dim: int = LATENT_DIM):
         super().__init__()
         self.layers = 7          # image channels
-        self.fov = 21
+        self.fov = fov
 
         self.conv = nn.Sequential(
             nn.Conv2d(self.layers, 32, 3, padding=1),
@@ -60,7 +60,7 @@ class QNetwork(nn.Module):
         self.hid_dim = LATENT_DIM
         self.fov = fov
         self.num_actions = 3
-        self.encoder = Encoder(hid_dim=self.hid_dim)
+        self.encoder = Encoder(fov, hid_dim=self.hid_dim)
 
         self.NeighborHeurEncoder = nn.Sequential(
             nn.Conv2d(1, 8, 3, padding=1),
@@ -70,6 +70,18 @@ class QNetwork(nn.Module):
             nn.Flatten(),
             nn.Linear(4 * self.fov * self.fov, self.hid_dim),
             nn.LeakyReLU()
+        )
+
+        self.neigh_coord_fc = nn.Sequential(
+            nn.Linear(2, self.hid_dim),
+            nn.LeakyReLU(),
+            nn.Linear(self.hid_dim, self.hid_dim),
+        )
+
+        self.neigh_out = nn.Sequential(
+            nn.Linear(self.hid_dim*2, self.hid_dim),
+            nn.LeakyReLU(),
+            nn.Linear(self.hid_dim, self.hid_dim),
         )
 
         # utility net (concatenation path)
@@ -91,6 +103,7 @@ class QNetwork(nn.Module):
                 batch_obs: list[torch.Tensor],
                 batch_close_pairs: list[list[tuple[int,int]]],
                 batch_neighbor_patches: list[list[torch.Tensor]] = None,  # list of (num_agents, num_neighbors, C, F, F)
+                batch_neigh_coords = None,
             ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
         #### ---------------------------------------------------------------- ##
@@ -99,6 +112,8 @@ class QNetwork(nn.Module):
         device   = batch_obs[0].device
         batch_size = len(batch_obs)
         hid_dim = self.hid_dim
+
+        USE_NEIGH_COORD = True
 
         #### ---------------------------------------------------------------- ##
         #### 1.  Flatten → encode every agent once
@@ -134,22 +149,38 @@ class QNetwork(nn.Module):
             # Pad neighbor lists to max_neighbors and stack
             max_neighbors = max(neighbor_lens)
             padded_neighbors = []
-            for patches in all_neighbor_patches:
+            pad_neigh_coord = []
+            for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
                 n = len(patches)
                 if n < max_neighbors:
                     pad = torch.zeros((max_neighbors - n, 1, self.fov, self.fov), device=device)
                     padded_neighbors.append(torch.cat([patches, pad], dim=0))
+
+                    pad = torch.zeros(max_neighbors - n, 2, device=device)
+                    pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
                 else:
                     padded_neighbors.append(patches)
+                    pad_neigh_coord.append(coord_patches)
+
             # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
             all_neighbors_tensor = torch.stack(padded_neighbors, dim=0)
             assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov)
 
+            pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0)
+            assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2)
+
             # Flatten for CNN: (total_agents * max_neighbors, 1, self.fov, self.fov)
             flat_neighbors = all_neighbors_tensor.view(-1, 1, self.fov, self.fov)
             neighbor_embeds = self.NeighborHeurEncoder(flat_neighbors)  # (total_agents * max_neighbors, hid_dim)
-            neighbor_embeds = neighbor_embeds.view(total_agents, max_neighbors, hid_dim)
 
+            if USE_NEIGH_COORD:
+                flat_coords = pad_neigh_coord.view(-1, 2)
+                coords_embeds = self.neigh_coord_fc(flat_coords)
+                # coords_embeds: (total_agents * max_neighbors, hid_dim)
+                neighcoords_embeds = torch.cat([neighbor_embeds, coords_embeds], dim=1)
+                neighbor_embeds = self.neigh_out(neighcoords_embeds)
+
+            neighbor_embeds = neighbor_embeds.view(total_agents, max_neighbors, hid_dim)
             all_agent_embeds_tensor = batch_enc  # (total_agents, hid_dim)
 
             # ----------- Build mask for attention -------------
