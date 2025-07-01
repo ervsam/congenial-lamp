@@ -53,12 +53,13 @@ class Encoder(nn.Module):
 
 # %% Q-Network (agent utility network)
 class QNetwork(nn.Module):
-    def __init__(self, fov):
+    def __init__(self, fov, USE_NEIGHCOORDS):
         super(QNetwork, self).__init__()
         self.CONCAT = True
 
         self.hid_dim = LATENT_DIM
         self.fov = fov
+        self.USE_NEIGH_COORD = USE_NEIGHCOORDS
         self.num_actions = 3
         self.encoder = Encoder(fov, hid_dim=self.hid_dim)
 
@@ -113,8 +114,6 @@ class QNetwork(nn.Module):
         batch_size = len(batch_obs)
         hid_dim = self.hid_dim
 
-        USE_NEIGH_COORD = True
-
         #### ---------------------------------------------------------------- ##
         #### 1.  Flatten → encode every agent once
         #### ---------------------------------------------------------------- ##
@@ -149,31 +148,35 @@ class QNetwork(nn.Module):
             # Pad neighbor lists to max_neighbors and stack
             max_neighbors = max(neighbor_lens)
             padded_neighbors = []
-            pad_neigh_coord = []
-            for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
+            for patches in all_neighbor_patches:
                 n = len(patches)
                 if n < max_neighbors:
                     pad = torch.zeros((max_neighbors - n, 1, self.fov, self.fov), device=device)
                     padded_neighbors.append(torch.cat([patches, pad], dim=0))
 
                     pad = torch.zeros(max_neighbors - n, 2, device=device)
-                    pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
                 else:
                     padded_neighbors.append(patches)
-                    pad_neigh_coord.append(coord_patches)
-
             # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
             all_neighbors_tensor = torch.stack(padded_neighbors, dim=0)
             assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov)
-
-            pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0)
-            assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2)
 
             # Flatten for CNN: (total_agents * max_neighbors, 1, self.fov, self.fov)
             flat_neighbors = all_neighbors_tensor.view(-1, 1, self.fov, self.fov)
             neighbor_embeds = self.NeighborHeurEncoder(flat_neighbors)  # (total_agents * max_neighbors, hid_dim)
 
-            if USE_NEIGH_COORD:
+            if self.USE_NEIGH_COORD:
+                pad_neigh_coord = []
+                for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
+                    n = len(patches)
+                    if n < max_neighbors:
+                        pad = torch.zeros(max_neighbors - n, 2, device=device)
+                        pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
+                    else:
+                        pad_neigh_coord.append(coord_patches)
+                pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0)
+                assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2)
+
                 flat_coords = pad_neigh_coord.view(-1, 2)
                 coords_embeds = self.neigh_coord_fc(flat_coords)
                 # coords_embeds: (total_agents * max_neighbors, hid_dim)

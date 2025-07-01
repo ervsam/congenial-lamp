@@ -6,10 +6,10 @@ import os
 from collections import defaultdict
 import pickle
 from concurrent.futures import ThreadPoolExecutor
+import time
 
 from utils import *
 
-import time
 
 np.random.seed(0)
 
@@ -99,6 +99,22 @@ class Environment:
             self.heuristic_map = self._get_heuristic_map()
             np.save(root+heuristic_map_file, self.heuristic_map)
 
+        self._DHC_heur_map = {}
+        for goal, heur_map in self.heuristic_map.items():
+            dhc = np.zeros((4, *self.grid_map.shape), dtype=np.float32)
+            for y in range(self.grid_map.shape[0]):
+                for x in range(self.grid_map.shape[1]):
+                    if self.grid_map[y, x] == 0:
+                        if y > 0 and heur_map[y-1, x] < heur_map[y, x]:
+                            dhc[0, y, x] = 1
+                        if y < self.grid_map.shape[0]-1 and heur_map[y+1, x] < heur_map[y, x]:
+                            dhc[1, y, x] = 1
+                        if x > 0 and heur_map[y, x-1] < heur_map[y, x]:
+                            dhc[2, y, x] = 1
+                        if x < self.grid_map.shape[1]-1 and heur_map[y, x+1] < heur_map[y, x]:
+                            dhc[3, y, x] = 1
+            self._DHC_heur_map[goal] = dhc
+
         # FOR WHEN USING TRAINED MODEL
         self.use_QTRAN = True
         if self.use_QTRAN:
@@ -147,40 +163,15 @@ class Environment:
                         heuristic_map[(y, x)][y2, x2] = len(space_time_astar(self.grid_map, (y, x), [(y2, x2)], set(), set())) - 1
         return heuristic_map
 
-    def _get_DHC_heur_to_goal(self, goal):
-        heur = np.zeros((4, *self.grid_map.shape))
-        heur_map = self.heuristic_map[goal]
-        for y in range(self.grid_map.shape[0]):
-            for x in range(self.grid_map.shape[1]):
-                if self.grid_map[y, x] == 0:
-                    # up
-                    if y > 0 and heur_map[y-1, x] < heur_map[y, x]:
-                        assert heur_map[y-1, x] == heur_map[y, x]-1
-                        heur[0, y, x] = 1
-                    # down
-                    if y < self.grid_map.shape[0]-1 and heur_map[y+1, x] < heur_map[y, x]:
-                        assert heur_map[y+1, x] == heur_map[y, x]-1
-                        heur[1, y, x] = 1
-                    # left
-                    if x > 0 and heur_map[y, x-1] < heur_map[y, x]:
-                        assert heur_map[y, x-1] == heur_map[y, x]-1
-                        heur[2, y, x] = 1
-                    # right
-                    if x < self.grid_map.shape[1]-1 and heur_map[y, x+1] < heur_map[y, x]:
-                        assert heur_map[y, x+1] == heur_map[y, x]-1
-                        heur[3, y, x] = 1
-        return heur
-
     def _get_DHC_heur(self):
-        # DHC HEURISTIC MAP
-        DHC_heur = []
-        for agent in range(self.num_agents):
-            # number of goals, 4 directions, map size
-            heur = np.zeros((len(self.goals[agent]), 4, *self.grid_map.shape))
-            for i, goal in enumerate(self.goals[agent]):
-                heur[i] = self._get_DHC_heur_to_goal(goal)
-            DHC_heur.append(heur)
-        return DHC_heur
+        """
+        Assemble per-agent DHC heuristics from the precomputed map.
+        Returns a list of numpy arrays, one per agent, each of shape (num_goals, 4, H, W).
+        """
+        return [
+            np.stack([self._DHC_heur_map[goal] for goal in agent_goals], axis=0)
+            for agent_goals in self.goals
+        ]
 
     def reset(self, num_agents=None):
         if num_agents is not None:
@@ -448,37 +439,12 @@ class Environment:
 
 
     def _get_fov(self, grid_map, x, y, fov):
-        '''
-        Get the field of view centered at (x, y) with a size of fov x fov
-
-        Params
-        ======
-            grid_map (numpy array): grid map
-            x (int): x coordinate
-            y (int): y coordinate
-            fov (int): field of view size
-
-        Returns
-        =======
-            numpy array: field of view
-        '''
-        max_val = np.max(grid_map)
         padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=0)
         return padded_grid[x:x+fov, y:y+fov]
 
     def get_obs(self):
-        '''
-        Get the field of view for all agents
-
-        Returns
-        =======
-            torch tensor: field of view for all agents
-        '''
-
         layers = 8
-
         obs = np.zeros((self.num_agents, layers, self.fov, self.fov), dtype=np.float32)
-
         starts, goals = self.starts, self.goals
 
         for agent, (agent_pos, goal) in enumerate(zip(starts, goals)):
@@ -493,24 +459,13 @@ class Environment:
             agent_map[arr[:,0], arr[:,1]] = 1
             obs[agent, 1] = self._get_fov(agent_map, x, y, self.fov)
 
-            # 2. HEURISTIC TO GOAL
+            # 3. HEURISTIC TO GOAL
             # heur = self._get_fov(self.heuristic_map[goal[0]], x, y, self.fov)
             padded_grid = np.pad(self.heuristic_map[goal[0]], pad_width=self.fov//2, mode='constant', constant_values=np.inf)
             heur = padded_grid[x:x+self.fov, y:y+self.fov]
             # normalize the heuristic map
             max_val = np.max(heur[heur < np.inf])
             obs[agent, 2] = heur / max_val
-
-            # 3. COMBINED HEURISTIC MAP
-            # neighbours = self._get_neighboring_agents(agent)
-            # agent_heur = np.zeros((self.fov, self.fov))
-            # for n in neighbours:
-            #     # get heuristic map of each agent and combine the heuristic maps
-            #     agent_heur += self._get_fov(
-            #         self.heuristic_map[goals[n][0]], x, y, self.fov)
-            # # d. normalize the combined heuristic map
-            # max_val = np.max(agent_heur[agent_heur < np.inf])
-            # obs[agent, 3] = agent_heur / (max_val + 1e-10)
 
             # 4. DHC HEURISTIC LAYER
             obs[agent, 3] = self._get_fov(self.DHC_heur[agent][0][0], x, y, self.fov)
@@ -562,39 +517,6 @@ class Environment:
                 patches.append((heur_fov, coord))
             neighbor_features_and_coord.append(patches)
         return neighbor_features_and_coord
-    # OLD (DELETE)
-    # def get_neighbor_goal_heuristics_as_patches(self):
-    #     """
-    #     For each agent, returns a list of FOV patches for all its neighbors' goal heuristics.
-    #     Returns:
-    #         List[List[Tensor]]: shape (num_agents, num_neighbors_i, C, fov, fov)
-    #     """
-    #     num_agents = self.num_agents
-    #     neighbor_features_and_coord = []
-    #     for agent in range(num_agents):
-    #         x, y = self.starts[agent]
-    #         neighbors = self._get_neighboring_agents(agent)
-    #         patches = []
-    #         for neighbor in neighbors:
-    #             neighbor_goal = self.goals[neighbor][0]
-    #             heur_map = self.heuristic_map[neighbor_goal]
-
-    #             padded_grid = np.pad(heur_map, pad_width=self.fov//2, mode='constant', constant_values=np.inf)
-    #             heur = padded_grid[x:x+self.fov, y:y+self.fov]
-    #             # normalize the heuristic map
-    #             max_val = np.max(heur[heur < np.inf])
-    #             heur_fov = heur / max_val
-                
-    #             # Optionally expand dims to match encoder input shape, e.g., (1, fov, fov)
-    #             # and to float32 tensor
-    #             heur_fov = torch.tensor(heur_fov, dtype=torch.float32).unsqueeze(0)
-    #             heur_fov = torch.where(torch.isinf(heur_fov), torch.tensor(1), heur_fov)
-
-    #             neigh_y, neigh_x = self.starts[neighbor]
-    #             coord = torch.tensor([neigh_x / self.size_x, neigh_y / self.size_y], dtype=torch.float32)
-    #             patches.append((heur_fov, coord))
-    #         neighbor_features_and_coord.append(patches)
-    #     return neighbor_features_and_coord
 
 
     def _get_neighboring_agents(self, agent):

@@ -3,14 +3,15 @@ warehouse_2:
 
   environment:
     NUM_AGENTS: 70
-    FOV: 21
     WINDOW_SIZE: 5
+    FOV: 21 # WINDOW_SIZE * 4 + 1
   
   training:
     N_ACTIONS: 3
     DEVICE: "cuda:1"
     BATCH_SIZE: 128
     LR: 1e-4
+    EPOCHS: 100
 
   paths:
     results: "warehouse_2_supervise/"

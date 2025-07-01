@@ -726,5 +726,7 @@ inference time: 0.055s
 TODO:
 - get loss plot, accuracy train test, performance comparison with PBS and random
 
+
+
 - clean up:
     - config.yaml, only necessary stuff
