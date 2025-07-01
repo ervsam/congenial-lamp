@@ -690,7 +690,7 @@ inference time: 0.055s
 
 ## 27 JUN 2025
 1. compare for less agents (k=60), so that random_pbs doesnt get congested
-$ train model on 60 agents
+- train model on 60 agents
 
 - set random_pbs = true; as argument, default false
 
@@ -700,5 +700,31 @@ $ train model on 60 agents
 
 3. train on 70 agents with w = 20
 - to compare with random_pbs w = 20
-$ generate dataset for training
-$ over different agents and planning_window
+- generate dataset for training
+- over different agents and planning_window
+
+## 30 JUN 2025
+1. training model on w = 20
+- FOV = 81, bigger than the map
+
+2. predict the same amount as model
+- if model also performs worse, then we know it needs to choose correct pairs
+- otherwise, model only predicts how many pairs to choose
+- result: system becomes congested, model starts choosing more pairs
+
+## 1 JUL 2025
+1. training
+> train_neighcoords
+    - agents: 70
+    - planning_window: 5
+    - with neigh_coords
+> train_noneighcoords
+    - agents: 70
+    - planning_window: 5
+    - without neigh_coords
+
+TODO:
+- get loss plot, accuracy train test, performance comparison with PBS and random
+
+- clean up:
+    - config.yaml, only necessary stuff
