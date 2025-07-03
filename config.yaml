@@ -3,12 +3,12 @@ warehouse_2:
 
   environment:
     NUM_AGENTS: 70
-    WINDOW_SIZE: 5
-    FOV: 21 # WINDOW_SIZE * 4 + 1
+    WINDOW_SIZE: 20
+    FOV: 81 # WINDOW_SIZE * 4 + 1
   
   training:
     N_ACTIONS: 3
-    DEVICE: "cuda:1"
+    DEVICE: "cuda:2"
     BATCH_SIZE: 128
     LR: 1e-4
     EPOCHS: 100

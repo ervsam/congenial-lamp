@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from sklearn.metrics import f1_score
 
@@ -243,6 +244,7 @@ def evaluate(dataset, model, batch_size, epoch, criterion):
                 logits = logits[1] if len(logits) > 1 else logits[0]
 
             loss = criterion(logits, labels)
+
             pred = torch.argmax(logits, dim=1)
             correct = (pred == labels).sum().item()
 
@@ -317,8 +319,8 @@ try:
 
     sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{NUM_AGENTS}/w{WINDOW_SIZE}/')
 
-    USE_NEIGHCOORDS = False
-    model_file = f"sup_pbs_neighcoord_{NUM_AGENTS}_w{WINDOW_SIZE}.pth"
+    USE_NEIGHCOORDS = True
+    model_file = f"sup_pbs_{NUM_AGENTS}_w{WINDOW_SIZE}.pth"
     writer = SummaryWriter(log_dir=f"runs/with_neighcoords/w{WINDOW_SIZE}/{NUM_AGENTS}")
 
     # --- Model, Optimizer, Loss ---
@@ -412,7 +414,7 @@ try:
     writer.close()
 
     # --- Run Evaluation on Test Set ---
-    model = QNetwork(fov=FOV).to(DEVICE)
+    model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
     model.load_state_dict(torch.load(model_file, map_location=DEVICE))
     with open(sample_file + 'test_samples.pkl', 'rb') as f:
         test_set_flatten = pickle.load(f)

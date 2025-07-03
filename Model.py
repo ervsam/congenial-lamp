@@ -55,7 +55,6 @@ class Encoder(nn.Module):
 class QNetwork(nn.Module):
     def __init__(self, fov, USE_NEIGHCOORDS):
         super(QNetwork, self).__init__()
-        self.CONCAT = True
 
         self.hid_dim = LATENT_DIM
         self.fov = fov

@@ -724,9 +724,21 @@ inference time: 0.055s
     - without neigh_coords
 
 TODO:
+- use sup_pbs_neighcoord_70_w5.pth to
 - get loss plot, accuracy train test, performance comparison with PBS and random
-
-
 
 - clean up:
     - config.yaml, only necessary stuff
+
+## meet
+1. correct implementation, forward shouldnt take that long
+2. performance better than pbs, find scenario where pbs is slow
+
+## 2 JUL 2025
+1. find scenario where pbs fails or is slow
+> running pbs num_agents 150, planning_window 20
+- average runtime: ?
+> running pbs num_agents 180, planning_window 20
+> running pbs num_agents 250, planning_window 20
+
+2. fix inference, runtime is too slow
