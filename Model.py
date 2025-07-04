@@ -126,7 +126,7 @@ class QNetwork(nn.Module):
         assert batch_obs.shape == (batch_size*2, 7, self.fov, self.fov), f"Expected {(batch_size*2, 7, self.fov, self.fov)}, got {batch_obs.shape}"
 
         batch_enc   = self.encoder(batch_obs, batch_coordinates)     # (batch_size*2, h)
-        assert batch_enc.shape == (batch_size*2, hid_dim)
+        assert batch_enc.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {batch_enc.shape}"
 
         # ----- Encode neighbor patches (batched across all episodes and agents) -----
         if batch_neighbor_patches is not None:
@@ -158,7 +158,7 @@ class QNetwork(nn.Module):
                     padded_neighbors.append(patches)
             # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
             all_neighbors_tensor = torch.stack(padded_neighbors, dim=0)
-            assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov)
+            assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov), f"Expected {(batch_size*2, max_neighbors, 1, self.fov, self.fov)}, got {all_neighbors_tensor.shape}"
 
             # Flatten for CNN: (total_agents * max_neighbors, 1, self.fov, self.fov)
             flat_neighbors = all_neighbors_tensor.view(-1, 1, self.fov, self.fov)
@@ -174,7 +174,7 @@ class QNetwork(nn.Module):
                     else:
                         pad_neigh_coord.append(coord_patches)
                 pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0)
-                assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2)
+                assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2), f"Expected {(batch_size*2, max_neighbors, 2)}, got {pad_neigh_coord.shape}"
 
                 flat_coords = pad_neigh_coord.view(-1, 2)
                 coords_embeds = self.neigh_coord_fc(flat_coords)
@@ -193,9 +193,9 @@ class QNetwork(nn.Module):
 
             # ----------- Batched attention for all agents -------------
             agent_embed_q = all_agent_embeds_tensor.unsqueeze(1)          # (total_agents, 1, H)
-            assert agent_embed_q.shape == (batch_size*2, 1, hid_dim)
+            assert agent_embed_q.shape == (batch_size*2, 1, hid_dim), f"Expected {(batch_size*2, 1, hid_dim)}, got {agent_embed_q.shape}"
             neighbor_embeds_kv = neighbor_embeds                          # (total_agents, max_neighbors, H)
-            assert neighbor_embeds_kv.shape == (batch_size*2, max_neighbors, hid_dim)
+            assert neighbor_embeds_kv.shape == (batch_size*2, max_neighbors, hid_dim), f"Expected {(batch_size*2, max_neighbors, hid_dim)}, got {neighbor_embeds_kv.shape}"
 
             attn_out, _ = self.neighbor_attn(
                 agent_embed_q,
@@ -204,7 +204,7 @@ class QNetwork(nn.Module):
                 key_padding_mask=mask
             )  # (total_agents, 1, H)
             fused_embeds = attn_out.squeeze(1)  # (total_agents, H)
-            assert fused_embeds.shape == (batch_size*2, hid_dim)
+            assert fused_embeds.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {fused_embeds.shape}"
 
             # Optionally set n=0 agents to their own embedding
             for i, n in enumerate(neighbor_lens):
@@ -213,7 +213,7 @@ class QNetwork(nn.Module):
 
             batch_enc = fused_embeds
 
-        assert batch_enc.shape == (batch_size*2, hid_dim)
+        assert batch_enc.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {batch_enc.shape}"
         
         #### ---------------------------------------------------------------- ##
         #### 2.  Build pair encodings + utility head for each episode

@@ -105,7 +105,6 @@ class PairDataset(Dataset):
 
         t_obs = time.time()
         obs_fovs = self.env.get_obs([a, b])
-        device = obs_fovs.device
         # print(f"get_obs time: {time.time() - t_obs:.3f}s")
 
         t_nf = time.time()
@@ -121,8 +120,6 @@ class PairDataset(Dataset):
         
         neigh_coords = [torch.stack([n[1] for n in neigh])for neigh in neighbor_features_and_coord]
 
-        label = torch.tensor(label).to(device, non_blocking=True)
-
         return obs, neigh, neigh_coords, label
 
 def custom_collate(batch):
@@ -131,7 +128,7 @@ def custom_collate(batch):
     # Stack observations into single tensor: (batch_size, 2, C, H, W)
     obs_batch = torch.stack(obs_list)
     # Labels tensor
-    labels_batch = torch.stack(labels_list)
+    labels_batch = torch.tensor(labels_list)
     # neigh_list is a tuple of lists [nbatch of [tensor,...], ...], convert to list
     neigh_batch = list(neigh_list)
     # neigh_coords_batch = list(neigh_coords_list)
@@ -147,11 +144,11 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         batch_size=BATCH_SIZE,
         collate_fn=custom_collate,
         shuffle=True,
-        # num_workers=1,               # ← dispatch 4 workers in parallel
-        # prefetch_factor=1,           # ← each worker will pre‐fetch 2 samples into its buffer
-        # persistent_workers=True,     # ← keep workers alive across epochs
+        num_workers=3,               # ← dispatch 4 workers in parallel
+        prefetch_factor=1,           # ← each worker will pre‐fetch 2 samples into its buffer
+        persistent_workers=True,     # ← keep workers alive across epochs
         # pin_memory=True,             # ← stage CPU→GPU copies asynchronously
-        # multiprocessing_context=mp.get_context('spawn'),
+        multiprocessing_context=mp.get_context('spawn'),
     )
 
     print(f"Number of batches: {len(balanced_loader)}")
@@ -170,6 +167,8 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             t0 = time.time()
 
             obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch = batch
+            device = obs_fovs_batch.device
+            labels_batch = labels_batch.to(device, non_blocking=True)
             batch_size = len(labels_batch)
 
             t1 = time.time()
