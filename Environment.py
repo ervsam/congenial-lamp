@@ -123,6 +123,23 @@ class Environment:
         if self.use_QTRAN:
             self.DHC_heur = self._get_DHC_heur()
 
+        pad = self.fov // 2
+        # Set device for all tensor operations
+        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        # (a) Build one giant CPU tensor of shape (G, 1, H+2pad, W+2pad)
+        #     where G = number of unique goals
+        self._goal_list = list(self.heuristic_map.keys())
+        maps = []
+        for goal in self._goal_list:
+            arr = self.heuristic_map[goal].astype(np.float32)
+            maps.append(np.pad(arr, pad_width=pad, mode='constant', constant_values=np.inf))
+        # Stack once and move to device
+        self._padded_maps = torch.from_numpy(np.stack(maps, axis=0)) \
+                                 .unsqueeze(1) \
+                                 .to(self.device, non_blocking=True)  # (G,1,H',W')
+        # (b) A lookup from goal→index in that tensor
+        self._goal_index = {g:i for i,g in enumerate(self._goal_list)}
+
     def _get_start_locs(self):
         # choose self.num_agents random starting positions
         idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
@@ -444,44 +461,48 @@ class Environment:
     def _get_fov(self, grid_map, x, y, fov):
         padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=0)
         return padded_grid[x:x+fov, y:y+fov]
-    def get_obs(self):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        N = self.num_agents
+    def get_obs(self, agents):
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        # N = self.num_agents
+        N = len(agents)
+        starts = [self.starts[a] for a in agents]
+        goals = [self.goals[a] for a in agents]
+
         fov = self.fov
         pad = fov // 2
         layers = 8
 
         # Pre-pad static grid map (obstacles)
-        grid = torch.from_numpy(self.grid_map.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W)
+        grid = torch.from_numpy(self.grid_map.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device, non_blocking=True)  # (1,1,H,W)
         obstacle_map = F.pad(grid, (pad, pad, pad, pad), value=0.0)  # (1,1,H',W')
 
         # Pre-pad agent occupancy map template
         agent_map_np = np.zeros_like(self.grid_map, dtype=np.float32)
-        arr = np.array(self.starts)
+        arr = np.array(starts)
         agent_map_np[arr[:,0], arr[:,1]] = 1.0
-        agent_map = torch.from_numpy(agent_map_np).unsqueeze(0).unsqueeze(0).to(device)
+        agent_map = torch.from_numpy(agent_map_np).unsqueeze(0).unsqueeze(0).to(device, non_blocking=True)
         agent_map_padded = F.pad(agent_map, (pad, pad, pad, pad), value=0.0)
 
         # Pre-pad and stack first-goal heuristic maps per agent
         heur_padded = []
-        for gs in self.goals:
+        for gs in goals:
             arr = self.heuristic_map[gs[0]].astype(np.float32)
-            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
+            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device, non_blocking=True)
             heur_padded.append(F.pad(t, (pad, pad, pad, pad), value=float('inf')))
         heur_maps = torch.cat(heur_padded, dim=0)  # (N,1,H',W')
 
         # Pre-pad and stack DHC heuristic layers (4 directions)
         dhc_layers = []
         for i in range(4):
-            arrs = [self.DHC_heur[a][0][i].astype(np.float32) for a in range(N)]
-            t = torch.from_numpy(np.stack(arrs)).unsqueeze(1).to(device)  # (N,1,H,W)
+            arrs = [self.DHC_heur[a][0][i].astype(np.float32) for a in agents]
+            t = torch.from_numpy(np.stack(arrs)).unsqueeze(1).to(device, non_blocking=True)  # (N,1,H,W)
             dhc_layers.append(F.pad(t, (pad, pad, pad, pad), value=0.0))  # list of (N,1,H',W')
 
         # Allocate output tensor
         obs_fovs = torch.empty((N, layers, fov, fov), device=device, dtype=torch.float32)
 
         # Slice out each agent's fields of view directly on GPU
-        for a, (y0, x0) in enumerate(self.starts):
+        for a, (y0, x0) in enumerate(starts):
             # 0: obstacles
             obs_fovs[a, 0] = obstacle_map[0, 0, y0:y0+fov, x0:x0+fov]
             # 1: other agents
@@ -505,59 +526,11 @@ class Environment:
         return obs_fovs
 
     def get_neighbor_goal_heuristics_as_patches(self, agents):
-
-        # OLD
-        num_agents = self.num_agents
-        fov = self.fov
-        neighbor_features_and_coord = []
+        # --- vectorized patch extraction via tensor.unfold (no large allocation) ---
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-        # Precompute padded heuristic maps for all unique goals
-        padded_heur_maps = {}
-        for agent_goals in self.goals:
-            for goal in agent_goals:
-                if goal not in padded_heur_maps:
-                    heur_map = self.heuristic_map[goal]
-                    padded_heur_maps[goal] = np.pad(heur_map, pad_width=fov//2, mode='constant', constant_values=np.inf)
-
-        for agent in agents:
-            x, y = self.starts[agent]
-            neighbors = self._get_neighboring_agents(agent)
-            patches = []
-            for neighbor in neighbors:
-                neighbor_goal = self.goals[neighbor][0]
-                padded_grid = padded_heur_maps[neighbor_goal]
-                heur = padded_grid[x:x+fov, y:y+fov]
-
-                # Normalize (skip all-inf region)
-                mask = (heur < np.inf)
-                max_val = np.max(heur[mask]) if np.any(mask) else 1.0
-                heur_fov = heur / max_val
-                heur_fov = np.where(np.isinf(heur_fov), 1, heur_fov)
-                heur_fov = torch.from_numpy(heur_fov.astype(np.float32)).unsqueeze(0).to(device)  # (1, fov, fov)
-
-                neigh_y, neigh_x = self.starts[neighbor]
-                coord = torch.tensor([neigh_x / self.size_x, neigh_y / self.size_y], dtype=torch.float32).to(device)
-                patches.append((heur_fov, coord))
-            neighbor_features_and_coord.append(patches)
-        return neighbor_features_and_coord
-    
-        num_agents = len(agents)
-        goals = [self.goals[a] for a in agents]
         fov = self.fov
-        pad = fov // 2
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-        # 1) Pad each unique goal map once, on device
-        # padded_maps = {}
-        # for agent_goals in self.goals:
-        #     for goal in agent_goals:
-        #         if goal not in padded_maps:
-        #             arr = self.heuristic_map[goal].astype(np.float32)
-        #             t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
-        #             padded_maps[goal] = F.pad(t, (pad, pad, pad, pad), value=float('inf'))
-
-        # 2) Gather all entries: (agent, neighbor, center_y, center_x)
+        padded_t = self._padded_maps  # (G,1,H',W')
+        # 1) collect all (agent,neighbor, y0,x0) entries and coords
         entries = []
         coords = []
         for agent in agents:
@@ -568,63 +541,30 @@ class Environment:
                 coords.append((nx / self.size_x, ny / self.size_y))
         P = len(entries)
         if P == 0:
-            return [[] for _ in range()]
-
-        # Prepare output tensors
-        feats = torch.empty((P, 1, fov, fov), device=device)
+            return [[] for _ in agents]
+        # 2) build index tensors
+        goal_idxs = torch.tensor([self._goal_index[self.goals[nbr][0]] for (_, nbr, _, _) in entries], device=device, dtype=torch.long)
+        # Build y_idxs and x_idxs
+        y_idxs = torch.tensor([y0 for (_, _, y0, _) in entries], device=device, dtype=torch.long)
+        x_idxs = torch.tensor([x0 for (_, _, _, x0) in entries], device=device, dtype=torch.long)
+        # 3) vectorized slicing via tensor.unfold views (no large allocation)
+        # padded_t: (G,1,H',W')
+        # windows: view of shape (G,1,H_p,W_p,fov,fov)
+        windows = padded_t.unfold(2, fov, 1).unfold(3, fov, 1)  # (G,1,H_p,W_p,fov,fov)
+        # Extract patches at desired positions: windows[goal,0,y0,x0] -> (P,fov,fov)
+        patches = windows[goal_idxs, 0, y_idxs, x_idxs]  # (P,fov,fov)
+        patches = patches.unsqueeze(1)  # (P,1,fov,fov)
+        # 4) normalize all patches in batch
+        mask = patches != float('inf')
+        vals = patches.masked_fill(~mask, 0.0).view(P, -1)
+        maxv = vals.max(dim=1)[0].clamp(min=1.0).view(-1,1,1,1)
+        patches = (patches / maxv).masked_fill(~mask, 1.0)
+        # 5) assemble per-agent lists
+        neighbor_features_and_coord = [[] for _ in agents]
         coord_t = torch.tensor(coords, dtype=torch.float32, device=device)
-
-        # 3) Group entry indices by goal to reuse one unfold per goal
-        from collections import defaultdict
-        goal_groups = defaultdict(list)
-        for idx, (_, nbr, _, _) in enumerate(entries):
-            goal = self.goals[nbr][0]
-            goal_groups[goal].append(idx)
-
-        H_p = None
-        W_p = None
-        # 4) Process each goal group
-        for goal, idxs in goal_groups.items():
-            # padded = padded_maps[goal]  # (1,1,H',W')
-
-            arr = self.heuristic_map[goal].astype(np.float32)
-            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
-            padded = F.pad(t, (pad, pad, pad, pad), value=float('inf'))
-
-            # Unfold patches once
-            if H_p is None:
-                H_p = padded.size(2) - fov + 1
-                W_p = padded.size(3) - fov + 1
-            # Compute flat center indices for this group
-            flat_idxs = [y0 * W_p + x0 for (_, _, y0, x0) in (entries[i] for i in idxs)]
-            flat_idxs = torch.tensor(flat_idxs, device=device, dtype=torch.long)
-            # Extract all patches for this goal: (num_pos, fov*fov)
-            patches_unfold = F.unfold(padded, kernel_size=(fov, fov)).squeeze(0).transpose(0,1)
-            # Gather the required patches by direct indexing
-            sel_flat = patches_unfold[flat_idxs]  # (group_size, fov*fov)
-            sel = sel_flat.view(-1, 1, fov, fov)
-            # Normalize in batch, preserving inf as 1.0
-            # Create mask of valid (non-inf) entries
-            mask = sel != float('inf')
-            # Compute max over only valid entries (replace invalid with 0 for max computation)
-            valid_vals = sel.masked_fill(~mask, 0.0)
-            max_vals = valid_vals.view(sel.size(0), -1).max(dim=1)[0].clamp(min=1.0).view(-1,1,1,1)
-            # Normalize all values
-            normed = sel / max_vals
-            # Set any originally-infinite positions to 1.0
-            normed = normed.masked_fill(~mask, 1.0)
-            sel = normed
-            feats[idxs] = sel
-
-        # 5) Assemble per-agent lists
-        neighbor_features_and_coord = {
-            agents[0]: [],
-            agents[1]: []
-        }
-        for idx, (agent, nbr, _, _) in enumerate(entries):
-            neighbor_features_and_coord[agent].append((feats[idx], coord_t[idx]))
-
-        return [neighbor_features_and_coord[agents[0]], neighbor_features_and_coord[agents[1]]]
+        for idx, (agent, _, _, _) in enumerate(entries):
+            neighbor_features_and_coord[agents.index(agent)].append((patches[idx], coord_t[idx]))
+        return neighbor_features_and_coord
 
 
     def _get_neighboring_agents(self, agent):

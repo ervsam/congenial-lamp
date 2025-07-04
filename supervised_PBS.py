@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import f1_score
 import torch.multiprocessing as mp
 
@@ -24,16 +24,6 @@ from Environment import Environment
 from Model import QNetwork
 from utils import Logger, step
 
-# --- Dataset Generation ---
-class PairwiseDataset(Dataset):
-    def __init__(self, samples):
-        self.samples = samples
-    def __len__(self):
-        return len(self.samples)
-    def __getitem__(self, idx):
-        s = self.samples[idx]
-        return s
-    
 class PairDataset(Dataset):
     def __init__(self, data_txt, env):
         self.env   = env
@@ -114,7 +104,7 @@ class PairDataset(Dataset):
         # print(f"_get_DHC_heur time: {time.time() - t0:.3f}s")
 
         t_obs = time.time()
-        obs_fovs = self.env.get_obs()
+        obs_fovs = self.env.get_obs([a, b])
         device = obs_fovs.device
         # print(f"get_obs time: {time.time() - t_obs:.3f}s")
 
@@ -122,42 +112,18 @@ class PairDataset(Dataset):
         neighbor_features_and_coord = self.env.get_neighbor_goal_heuristics_as_patches([a, b])
         # print(f"get_neighbor_goal_heuristics time: {time.time() - t_nf:.3f}s")
 
-        obs = torch.stack([obs_fovs[a], obs_fovs[b]])  # shape (2, C, H, W)
+        obs = torch.stack([obs_fovs[0], obs_fovs[1]])  # shape (2, C, H, W)
 
-        stacked_neigh = [
+        neigh = [
             torch.stack([n[0] for n in neigh]) if len(neigh) > 0 else None
             for neigh in neighbor_features_and_coord
         ]
-        neigh = [stacked_neigh[0], stacked_neigh[1]]
         
-        stacked_coords = [[n[1] for n in neigh] for neigh in neighbor_features_and_coord]
-        neigh_coords = [torch.stack(stacked_coords[0]), torch.stack(stacked_coords[1])]
+        neigh_coords = [torch.stack([n[1] for n in neigh])for neigh in neighbor_features_and_coord]
 
-        label = torch.tensor(label).to(device)
+        label = torch.tensor(label).to(device, non_blocking=True)
 
         return obs, neigh, neigh_coords, label
-
-def flatten_samples(newdata):
-    samples = []
-    for sample in newdata:
-        obs_fovs, neighbor_features, close_pairs, labels = sample
-        # Pre-stack neighbor features for all agents only once per sample
-        stacked_neigh = [
-            torch.stack([n[0] for n in neigh]) if len(neigh) > 0 else None
-            for neigh in neighbor_features
-        ]
-        stacked_coords = [[n[1] for n in neigh] for neigh in neighbor_features]
-        for i, label in enumerate(labels):
-            a, b = close_pairs[i]
-            entry = {
-                'obs_fov': torch.stack([obs_fovs[a], obs_fovs[b]]),  # shape (2, C, H, W)
-                'neighbor_features': [stacked_neigh[a], stacked_neigh[b]],
-                'close_pair': (a, b),
-                'label': label.item() if torch.is_tensor(label) else int(label),
-                'neigh_coords': [stacked_coords[a], stacked_coords[b]],
-            }
-            samples.append(entry)
-    return samples
 
 def custom_collate(batch):
     # batch: list of (obs, neigh, neigh_coords, label)
@@ -172,84 +138,8 @@ def custom_collate(batch):
     neigh_coords_batch = [element for sublist in neigh_coords_list for element in sublist]
     return obs_batch, neigh_batch, neigh_coords_batch, labels_batch
 
-
-def undersample_samples(samples):
-    # Group indices by class
-    class_indices = defaultdict(list)
-    for idx, entry in enumerate(samples):
-        class_indices[entry['label']].append(idx)
-    # Find the minority class count
-    min_count = min(len(v) for v in class_indices.values())
-    print(f"Undersampling to {min_count} samples per class")
-    # Randomly select min_count indices per class
-    undersampled_indices = []
-    for indices in class_indices.values():
-        undersampled_indices.extend(random.sample(indices, min_count))
-    # Build the new undersampled samples list
-    undersampled_samples = [samples[i] for i in undersampled_indices]
-    random.shuffle(undersampled_samples)
-    return undersampled_samples
-
-def move_batch(batch):
-    return batch
-    obs, neigh, coords, labels = batch
-    obs = obs.to(DEVICE, non_blocking=True) # torch.Size([64, 2, 8, 11, 11])
-    if USE_NEIGHCOORDS:
-        coords = [c.to(DEVICE, non_blocking=True) for c in coords] # (64, 2, tensor('num_neigh', 1, 11, 11))
-    else:
-        coords = None
-    labels = labels.to(DEVICE, non_blocking=True) # labels_batch: (64)
-    return obs, neigh, coords, labels
-
 # --- Training Loop ---
 def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None, train_set=None, test_set=None):
-
-    # if os.path.exists(sample_file + 'samples.pkl'):
-    #     print(f"Loading samples from {sample_file}...")
-    #     with open(sample_file + 'samples.pkl', 'rb') as f:
-    #         samples = pickle.load(f)
-    #     print(f"Loaded {len(samples)} train samples.")
-
-    #     with open(sample_file + 'test_samples.pkl', 'rb') as f:
-    #         test_set_flatten = pickle.load(f)
-    #     print(f"Loaded {len(test_set_flatten)} test samples.")
-    # else:
-    #     all_labels = [lab for sam in train_set for lab in sam[label_idx]]
-    #     print("Train label 0:", all_labels.count(0), "1:", all_labels.count(1), "2:", all_labels.count(2))
-    #     all_labels = [lab for sam in test_set for lab in sam[label_idx]]
-    #     print("Test label 0:", all_labels.count(0), "1:", all_labels.count(1), "2:", all_labels.count(2))
-
-    #     t0 = time.time()
-    #     samples = flatten_samples(train_set)
-    #     print(f"Flattened {len(samples)} samples in {time.time() - t0:.3f}s")
-
-    #     # undersample
-    #     samples = undersample_samples(samples)
-    #     with open(sample_file + 'samples.pkl', 'wb') as f:
-    #         pickle.dump(samples, f, protocol=pickle.HIGHEST_PROTOCOL)
-    #     print(f"Saved {len(samples)} samples to {sample_file + 'samples.pkl'}.")
-
-    #     test_set_flatten = flatten_samples(test_set)
-    #     with open(sample_file + 'test_samples.pkl', 'wb') as f:
-    #         pickle.dump(test_set_flatten, f, protocol=pickle.HIGHEST_PROTOCOL)
-    #     print(f"Saved {len(test_set_flatten)} samples to {sample_file + 'test_samples.pkl'}.")
-
-    # labels = [entry['label'] for entry in samples]
-    # print("Undersampled Train label 0:", labels.count(0), "1:", labels.count(1), "2:", labels.count(2))
-    # labels = [entry['label'] for entry in test_set_flatten]
-    # print("Test label 0:", labels.count(0), "1:", labels.count(1), "2:", labels.count(2))
-
-    # pair_dataset = PairwiseDataset(samples)
-    # balanced_loader = DataLoader(
-    #     pair_dataset,
-    #     batch_size=BATCH_SIZE,
-    #     collate_fn=custom_collate,
-    #     shuffle=True,x
-    #     # num_workers=1,
-    #     # pin_memory=True,
-    #     # persistent_workers=True
-    # )
-
     data = PairDataset(sample_file+'data.txt', env)
 
     balanced_loader = DataLoader(
@@ -279,7 +169,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         for batch_n, batch in tqdm(enumerate(balanced_loader)):
             t0 = time.time()
 
-            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch = move_batch(batch)
+            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch = batch
             batch_size = len(labels_batch)
 
             t1 = time.time()
@@ -287,10 +177,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             _, batch_q_vals = model(obs_fovs_batch, [], neighbor_features_batch, neigh_coords_batch)
             batch_q_vals_flat = batch_q_vals
 
-            print("here")
-            print(labels_batch[0].device)
             loss = criterion(batch_q_vals_flat, labels_batch)
-            print("her1")
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -306,7 +193,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             all_preds.extend(pred.cpu().tolist())
             all_labels.extend(labels_batch.cpu().tolist())
 
-            print(f"Batch {batch_n}: load={t1-t0:.3f}s, forward+back={t3-t1:.3f}s")
+            # print(f"Batch {batch_n}: load={t1-t0:.3f}s, forward+back={t3-t1:.3f}s")
 
         accuracy = total_correct / total_pred if total_pred > 0 else 0.0
         macro_f1 = f1_score(all_labels, all_preds, average='macro')
@@ -364,7 +251,7 @@ def evaluate(dataset, model, batch_size, epoch, criterion, writer):
             batch = dataset[i:i+batch_size]
             if not batch:
                 continue
-            obs_pair, neigh, neigh_coords, labels = move_batch(custom_collate(batch))
+            obs_pair, neigh, neigh_coords, labels = custom_collate(batch)
 
             # Forward pass
             logits = model(obs_pair, [], neigh, neigh_coords)
@@ -458,101 +345,6 @@ def main():
         # model = nn.DataParallel(model, device_ids=[0,1,2,3], output_device=0)
         optimizer = optim.Adam(model.parameters(), lr=LR)
         criterion = nn.CrossEntropyLoss()
-
-        # ------------ read from data.txt generated in C++ -------------
-        # logger = Logger()
-        # dataset = []
-        # data_ = []
-        # if not os.path.exists(sample_file + 'samples.pkl'):
-        #     with open(os.path.join(os.path.dirname(__file__), sample_file+'data.txt')) as f:
-        #         print("Reading from data.txt...")
-        #         for line in tqdm(f):
-        #             starts_str, goals_str, priorities_str = line.split(';')
-        #             starts = ast.literal_eval(starts_str)
-        #             goals = ast.literal_eval(goals_str)
-        #             priorities = ast.literal_eval(priorities_str.replace(': [', ':['))
-
-        #             row, col = env.grid_map.shape
-        #             row = row - 2
-        #             col = col - 2
-        #             assert (row, col) == (33, 46)
-        #             # revert from idx to coord
-        #             starts = [(start//col + 1, start%col + 1) for start in starts]
-        #             goals = [[(g//col + 1, g%col + 1) for g in goal] for goal in goals]
-
-        #             partial_prio = []
-        #             for low, highs in priorities.items():
-        #                 for high in highs:
-        #                     partial_prio.append((high, low))
-        #             data_.append(
-        #                 {
-        #                     'starts': starts,
-        #                     'goals': goals,
-        #                     'partial_prio': partial_prio
-        #                 }
-        #             )
-        #         # Initialize label counts
-        #         label_counts = Counter()
-
-        #         for d in tqdm(data_):
-        #             t0 = time.time()
-        #             env.starts = d['starts']
-        #             env.goals = d['goals']
-        #             priority_order = d['partial_prio']
-        #             env.DHC_heur = env._get_DHC_heur()
-        #             print(f"_get_DHC_heur time: {time.time() - t0:.3f}s")
-
-        #             t_cp = time.time()
-        #             close_pairs = env.get_close_pairs()
-        #             print(f"get_close_pairs time: {time.time() - t_cp:.3f}s")
-
-        #             t_obs = time.time()
-        #             obs_fovs = env.get_obs()
-        #             print(f"get_obs time: {time.time() - t_obs:.3f}s")
-
-        #             t_nf = time.time()
-        #             neighbor_features_and_coord = env.get_neighbor_goal_heuristics_as_patches()
-        #             print(f"get_neighbor_goal_heuristics time: {time.time() - t_nf:.3f}s")
-
-        #             t_lbl = time.time()
-        #             # Build a lookup for fast membership testing
-        #             prio_set = set(priority_order)
-        #             inv_prio_set = {(b, a) for (a, b) in priority_order}
-
-        #             # Vectorized label assignment
-        #             labels_list = [
-        #                 0 if pair in prio_set
-        #                 else 1 if pair in inv_prio_set
-        #                 else 2
-        #                 for pair in close_pairs
-        #             ]
-
-        #             # Update label counts in one go
-        #             label_counts.update(labels_list)
-
-        #             # Convert to tensor
-        #             labels = torch.tensor(labels_list, dtype=torch.long)
-        #             print(f"label construction time: {time.time() - t_lbl:.3f}s")
-        #             dataset.append((obs_fovs, neighbor_features_and_coord, close_pairs, labels))
-        #             print(f"Sample preprocessing time: {time.time() - t0:.3f}s")
-        #         # Print total label distribution
-        #         print(f"Total labels per class: 0={label_counts[0]}, 1={label_counts[1]}, 2={label_counts[2]}")
-        #         print("Done reading from data.txt...")
-
-        #     split = int(0.1 * len(dataset))
-        #     indices = list(np.random.choice(len(dataset), size=split, replace=False))
-        #     train_indices = list(set(range(len(dataset))) - set(indices))
-        #     train_set = [dataset[i] for i in train_indices]
-        #     test_set = [dataset[i] for i in indices]
-
-        #     # 4. Train for a few epochs
-        #     best_acc = train_on_dataset(
-        #         model, optimizer, criterion, EPOCHS, sample_file=sample_file, train_set=train_set, test_set=test_set
-        #     )
-        # else:
-        #     best_acc = train_on_dataset(
-        #         model, optimizer, criterion, EPOCHS, sample_file=sample_file
-        #     )
 
         best_acc = train_on_dataset(
             env, model, optimizer, criterion, BATCH_SIZE, EPOCHS, writer, model_file, sample_file=sample_file
