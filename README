@@ -742,3 +742,11 @@ TODO:
 > running pbs num_agents 250, planning_window 20
 
 2. fix inference, runtime is too slow
+
+## 3 JUL 2025
+1. train on 250 agents, window 20
+- seeing how many labels there are in current data.txt, if enough, then start training
+- train
+
+2. getting results for w=20 using model
+> result_70 w20

@@ -9,6 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 
 from utils import *
+import torch
+import torch.nn.functional as F
+import numpy as np
 
 
 np.random.seed(0)
@@ -441,52 +444,73 @@ class Environment:
     def _get_fov(self, grid_map, x, y, fov):
         padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=0)
         return padded_grid[x:x+fov, y:y+fov]
-
     def get_obs(self):
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        N = self.num_agents
+        fov = self.fov
+        pad = fov // 2
         layers = 8
-        obs = np.zeros((self.num_agents, layers, self.fov, self.fov), dtype=np.float32)
-        starts, goals = self.starts, self.goals
 
-        for agent, (agent_pos, goal) in enumerate(zip(starts, goals)):
-            x, y = agent_pos
+        # Pre-pad static grid map (obstacles)
+        grid = torch.from_numpy(self.grid_map.astype(np.float32)).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,H,W)
+        obstacle_map = F.pad(grid, (pad, pad, pad, pad), value=0.0)  # (1,1,H',W')
 
-            # 1. SURROUNDING OBSTACLES
-            obs[agent, 0] = self._get_fov(self.grid_map, x, y, self.fov)
+        # Pre-pad agent occupancy map template
+        agent_map_np = np.zeros_like(self.grid_map, dtype=np.float32)
+        arr = np.array(self.starts)
+        agent_map_np[arr[:,0], arr[:,1]] = 1.0
+        agent_map = torch.from_numpy(agent_map_np).unsqueeze(0).unsqueeze(0).to(device)
+        agent_map_padded = F.pad(agent_map, (pad, pad, pad, pad), value=0.0)
 
-            # 2. SURROUNDING AGENTS
-            agent_map = np.zeros((self.grid_map.shape))
-            arr = np.array(self.starts)
-            agent_map[arr[:,0], arr[:,1]] = 1
-            obs[agent, 1] = self._get_fov(agent_map, x, y, self.fov)
+        # Pre-pad and stack first-goal heuristic maps per agent
+        heur_padded = []
+        for gs in self.goals:
+            arr = self.heuristic_map[gs[0]].astype(np.float32)
+            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
+            heur_padded.append(F.pad(t, (pad, pad, pad, pad), value=float('inf')))
+        heur_maps = torch.cat(heur_padded, dim=0)  # (N,1,H',W')
 
-            # 3. HEURISTIC TO GOAL
-            # heur = self._get_fov(self.heuristic_map[goal[0]], x, y, self.fov)
-            padded_grid = np.pad(self.heuristic_map[goal[0]], pad_width=self.fov//2, mode='constant', constant_values=np.inf)
-            heur = padded_grid[x:x+self.fov, y:y+self.fov]
-            # normalize the heuristic map
-            max_val = np.max(heur[heur < np.inf])
-            obs[agent, 2] = heur / max_val
+        # Pre-pad and stack DHC heuristic layers (4 directions)
+        dhc_layers = []
+        for i in range(4):
+            arrs = [self.DHC_heur[a][0][i].astype(np.float32) for a in range(N)]
+            t = torch.from_numpy(np.stack(arrs)).unsqueeze(1).to(device)  # (N,1,H,W)
+            dhc_layers.append(F.pad(t, (pad, pad, pad, pad), value=0.0))  # list of (N,1,H',W')
 
-            # 4. DHC HEURISTIC LAYER
-            obs[agent, 3] = self._get_fov(self.DHC_heur[agent][0][0], x, y, self.fov)
-            obs[agent, 4] = self._get_fov(self.DHC_heur[agent][0][1], x, y, self.fov)
-            obs[agent, 5] = self._get_fov(self.DHC_heur[agent][0][2], x, y, self.fov)
-            obs[agent, 6] = self._get_fov(self.DHC_heur[agent][0][3], x, y, self.fov)
+        # Allocate output tensor
+        obs_fovs = torch.empty((N, layers, fov, fov), device=device, dtype=torch.float32)
 
-            normalized_coord = np.zeros((self.fov, self.fov))
-            normalized_coord[0, 0] = y / self.size_x
-            normalized_coord[0, 1] = x / self.size_y
-            obs[agent, 7] = normalized_coord
-
-        obs_fovs = torch.tensor(obs)
-        obs_fovs = torch.where(torch.isinf(obs_fovs), torch.tensor(1), obs_fovs)
+        # Slice out each agent's fields of view directly on GPU
+        for a, (y0, x0) in enumerate(self.starts):
+            # 0: obstacles
+            obs_fovs[a, 0] = obstacle_map[0, 0, y0:y0+fov, x0:x0+fov]
+            # 1: other agents
+            obs_fovs[a, 1] = agent_map_padded[0, 0, y0:y0+fov, x0:x0+fov]
+            # 2: heuristic to first goal (normalized)
+            patch = heur_maps[a, 0, y0:y0+fov, x0:x0+fov]
+            valid = patch != float('inf')
+            max_val = torch.max(torch.where(valid, patch, torch.tensor(float('-inf'), device=device)))
+            max_val = max_val.clamp(min=1.0)
+            norm = torch.where(~valid, torch.tensor(1.0, device=device), patch / max_val)
+            obs_fovs[a, 2] = norm
+            # 3-6: DHC directions
+            for i in range(4):
+                obs_fovs[a, 3 + i] = dhc_layers[i][a, 0, y0:y0+fov, x0:x0+fov]
+            # 7: normalized start coord
+            coord_map = torch.zeros((fov, fov), device=device)
+            coord_map[0, 0] = x0 / self.size_x
+            coord_map[0, 1] = y0 / self.size_y
+            obs_fovs[a, 7] = coord_map
 
         return obs_fovs
 
-    def get_neighbor_goal_heuristics_as_patches(self):
+    def get_neighbor_goal_heuristics_as_patches(self, agents):
+
+        # OLD
         num_agents = self.num_agents
         fov = self.fov
         neighbor_features_and_coord = []
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
         # Precompute padded heuristic maps for all unique goals
         padded_heur_maps = {}
@@ -496,7 +520,7 @@ class Environment:
                     heur_map = self.heuristic_map[goal]
                     padded_heur_maps[goal] = np.pad(heur_map, pad_width=fov//2, mode='constant', constant_values=np.inf)
 
-        for agent in range(num_agents):
+        for agent in agents:
             x, y = self.starts[agent]
             neighbors = self._get_neighboring_agents(agent)
             patches = []
@@ -510,13 +534,97 @@ class Environment:
                 max_val = np.max(heur[mask]) if np.any(mask) else 1.0
                 heur_fov = heur / max_val
                 heur_fov = np.where(np.isinf(heur_fov), 1, heur_fov)
-                heur_fov = torch.from_numpy(heur_fov.astype(np.float32)).unsqueeze(0)  # (1, fov, fov)
+                heur_fov = torch.from_numpy(heur_fov.astype(np.float32)).unsqueeze(0).to(device)  # (1, fov, fov)
 
                 neigh_y, neigh_x = self.starts[neighbor]
-                coord = torch.tensor([neigh_x / self.size_x, neigh_y / self.size_y], dtype=torch.float32)
+                coord = torch.tensor([neigh_x / self.size_x, neigh_y / self.size_y], dtype=torch.float32).to(device)
                 patches.append((heur_fov, coord))
             neighbor_features_and_coord.append(patches)
         return neighbor_features_and_coord
+    
+        num_agents = len(agents)
+        goals = [self.goals[a] for a in agents]
+        fov = self.fov
+        pad = fov // 2
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+        # 1) Pad each unique goal map once, on device
+        # padded_maps = {}
+        # for agent_goals in self.goals:
+        #     for goal in agent_goals:
+        #         if goal not in padded_maps:
+        #             arr = self.heuristic_map[goal].astype(np.float32)
+        #             t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
+        #             padded_maps[goal] = F.pad(t, (pad, pad, pad, pad), value=float('inf'))
+
+        # 2) Gather all entries: (agent, neighbor, center_y, center_x)
+        entries = []
+        coords = []
+        for agent in agents:
+            y0, x0 = self.starts[agent]
+            for nbr in self._get_neighboring_agents(agent):
+                entries.append((agent, nbr, y0, x0))
+                ny, nx = self.starts[nbr]
+                coords.append((nx / self.size_x, ny / self.size_y))
+        P = len(entries)
+        if P == 0:
+            return [[] for _ in range()]
+
+        # Prepare output tensors
+        feats = torch.empty((P, 1, fov, fov), device=device)
+        coord_t = torch.tensor(coords, dtype=torch.float32, device=device)
+
+        # 3) Group entry indices by goal to reuse one unfold per goal
+        from collections import defaultdict
+        goal_groups = defaultdict(list)
+        for idx, (_, nbr, _, _) in enumerate(entries):
+            goal = self.goals[nbr][0]
+            goal_groups[goal].append(idx)
+
+        H_p = None
+        W_p = None
+        # 4) Process each goal group
+        for goal, idxs in goal_groups.items():
+            # padded = padded_maps[goal]  # (1,1,H',W')
+
+            arr = self.heuristic_map[goal].astype(np.float32)
+            t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
+            padded = F.pad(t, (pad, pad, pad, pad), value=float('inf'))
+
+            # Unfold patches once
+            if H_p is None:
+                H_p = padded.size(2) - fov + 1
+                W_p = padded.size(3) - fov + 1
+            # Compute flat center indices for this group
+            flat_idxs = [y0 * W_p + x0 for (_, _, y0, x0) in (entries[i] for i in idxs)]
+            flat_idxs = torch.tensor(flat_idxs, device=device, dtype=torch.long)
+            # Extract all patches for this goal: (num_pos, fov*fov)
+            patches_unfold = F.unfold(padded, kernel_size=(fov, fov)).squeeze(0).transpose(0,1)
+            # Gather the required patches by direct indexing
+            sel_flat = patches_unfold[flat_idxs]  # (group_size, fov*fov)
+            sel = sel_flat.view(-1, 1, fov, fov)
+            # Normalize in batch, preserving inf as 1.0
+            # Create mask of valid (non-inf) entries
+            mask = sel != float('inf')
+            # Compute max over only valid entries (replace invalid with 0 for max computation)
+            valid_vals = sel.masked_fill(~mask, 0.0)
+            max_vals = valid_vals.view(sel.size(0), -1).max(dim=1)[0].clamp(min=1.0).view(-1,1,1,1)
+            # Normalize all values
+            normed = sel / max_vals
+            # Set any originally-infinite positions to 1.0
+            normed = normed.masked_fill(~mask, 1.0)
+            sel = normed
+            feats[idxs] = sel
+
+        # 5) Assemble per-agent lists
+        neighbor_features_and_coord = {
+            agents[0]: [],
+            agents[1]: []
+        }
+        for idx, (agent, nbr, _, _) in enumerate(entries):
+            neighbor_features_and_coord[agent].append((feats[idx], coord_t[idx]))
+
+        return [neighbor_features_and_coord[agents[0]], neighbor_features_and_coord[agents[1]]]
 
 
     def _get_neighboring_agents(self, agent):
