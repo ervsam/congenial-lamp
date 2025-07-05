@@ -100,10 +100,11 @@ class QNetwork(nn.Module):
         self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=2, batch_first=True)
 
     def forward(self,
-                batch_obs: list[torch.Tensor],
-                batch_close_pairs: list[list[tuple[int,int]]],
-                batch_neighbor_patches: list[list[torch.Tensor]] = None,  # list of (num_agents, num_neighbors, C, F, F)
+                batch_obs,
+                batch_close_pairs,
+                batch_neighbor_patches = None,  # list of (num_agents, num_neighbors, C, F, F)
                 batch_neigh_coords = None,
+                mask = None
             ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
         #### ---------------------------------------------------------------- ##
@@ -112,6 +113,10 @@ class QNetwork(nn.Module):
         device   = batch_obs[0].device
         batch_size = len(batch_obs)
         hid_dim = self.hid_dim
+
+        batch_neighbor_patches = batch_neighbor_patches.view(batch_size * 2, -1, 1, self.fov, self.fov)
+        batch_neigh_coords = batch_neigh_coords.view(batch_size*2, -1, 2)
+        mask = mask.view(batch_size*2, -1)
 
         #### ---------------------------------------------------------------- ##
         #### 1.  Flatten → encode every agent once
@@ -131,50 +136,57 @@ class QNetwork(nn.Module):
         # ----- Encode neighbor patches (batched across all episodes and agents) -----
         if batch_neighbor_patches is not None:
             # Flatten all agent embeddings, all neighbors, and store mapping
-            total_agents = len(batch_enc)
+            total_agents = batch_neighbor_patches.shape[0]
 
-            all_neighbor_patches = []
-            neighbor_lens = []    # number of neighbors per agent
-            for neighbor_patches in batch_neighbor_patches:
-                patches_1 = neighbor_patches[0].to(device)
-                neighbor_lens.append(len(patches_1))
-                all_neighbor_patches.append(patches_1)
+            # all_neighbor_patches = []
+            # neighbor_lens = []    # number of neighbors per agent
+            # for neighbor_patches in batch_neighbor_patches:
+            #     patches_1 = neighbor_patches[0].to(device)
+            #     neighbor_lens.append(len(patches_1))
+            #     all_neighbor_patches.append(patches_1)
 
-                patches_2 = neighbor_patches[1].to(device)
-                neighbor_lens.append(len(patches_2))
-                all_neighbor_patches.append(patches_2)
+            #     patches_2 = neighbor_patches[1].to(device)
+            #     neighbor_lens.append(len(patches_2))
+            #     all_neighbor_patches.append(patches_2)
 
-            # Pad neighbor lists to max_neighbors and stack
-            max_neighbors = max(neighbor_lens)
-            padded_neighbors = []
-            for patches in all_neighbor_patches:
-                n = len(patches)
-                if n < max_neighbors:
-                    pad = torch.zeros((max_neighbors - n, 1, self.fov, self.fov), device=device)
-                    padded_neighbors.append(torch.cat([patches, pad], dim=0))
+            # # Pad neighbor lists to max_neighbors and stack
+            # max_neighbors = max(neighbor_lens)
+            # padded_neighbors = []
+            # for patches in all_neighbor_patches:
+            #     n = len(patches)
+            #     if n < max_neighbors:
+            #         pad = torch.zeros((max_neighbors - n, 1, self.fov, self.fov), device=device)
+            #         padded_neighbors.append(torch.cat([patches, pad], dim=0))
 
-                    pad = torch.zeros(max_neighbors - n, 2, device=device)
-                else:
-                    padded_neighbors.append(patches)
-            # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
-            all_neighbors_tensor = torch.stack(padded_neighbors, dim=0)
-            assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov), f"Expected {(batch_size*2, max_neighbors, 1, self.fov, self.fov)}, got {all_neighbors_tensor.shape}"
+            #         pad = torch.zeros(max_neighbors - n, 2, device=device)
+            #     else:
+            #         padded_neighbors.append(patches)
+            # # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
+            # all_neighbors_tensor = torch.stack(padded_neighbors, dim=0)
+            # assert all_neighbors_tensor.shape == (batch_size*2, max_neighbors, 1, self.fov, self.fov), f"Expected {(batch_size*2, max_neighbors, 1, self.fov, self.fov)}, got {all_neighbors_tensor.shape}"
+
+            all_neighbors_tensor = batch_neighbor_patches
+            max_neighbors = all_neighbors_tensor.shape[1]
 
             # Flatten for CNN: (total_agents * max_neighbors, 1, self.fov, self.fov)
             flat_neighbors = all_neighbors_tensor.view(-1, 1, self.fov, self.fov)
+            assert flat_neighbors.shape == (total_agents * max_neighbors, 1, self.fov, self.fov), f"expected {(total_agents * max_neighbors, 1, self.fov, self.fov)}, but got {flat_neighbors.shape}"
+
             neighbor_embeds = self.NeighborHeurEncoder(flat_neighbors)  # (total_agents * max_neighbors, hid_dim)
 
             if self.USE_NEIGH_COORD:
-                pad_neigh_coord = []
-                for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
-                    n = len(patches)
-                    if n < max_neighbors:
-                        pad = torch.zeros(max_neighbors - n, 2, device=device)
-                        pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
-                    else:
-                        pad_neigh_coord.append(coord_patches)
-                pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0)
-                assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2), f"Expected {(batch_size*2, max_neighbors, 2)}, got {pad_neigh_coord.shape}"
+                # pad_neigh_coord = []
+                # for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
+                #     n = len(patches)
+                #     if n < max_neighbors:
+                #         pad = torch.zeros(max_neighbors - n, 2, device=device)
+                #         pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
+                #     else:
+                #         pad_neigh_coord.append(coord_patches)
+                # pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0)
+                # assert pad_neigh_coord.shape == (batch_size*2, max_neighbors, 2), f"Expected {(batch_size*2, max_neighbors, 2)}, got {pad_neigh_coord.shape}"
+
+                pad_neigh_coord = batch_neigh_coords
 
                 flat_coords = pad_neigh_coord.view(-1, 2)
                 coords_embeds = self.neigh_coord_fc(flat_coords)
@@ -186,10 +198,10 @@ class QNetwork(nn.Module):
             all_agent_embeds_tensor = batch_enc  # (total_agents, hid_dim)
 
             # ----------- Build mask for attention -------------
-            mask = torch.zeros((total_agents, max_neighbors), dtype=torch.bool, device=device)
-            for i, n in enumerate(neighbor_lens):
-                if n < max_neighbors:
-                    mask[i, n:] = True
+            # mask = torch.zeros((total_agents, max_neighbors), dtype=torch.bool, device=device)
+            # for i, n in enumerate(neighbor_lens):
+            #     if n < max_neighbors:
+            #         mask[i, n:] = True
 
             # ----------- Batched attention for all agents -------------
             agent_embed_q = all_agent_embeds_tensor.unsqueeze(1)          # (total_agents, 1, H)
@@ -206,10 +218,10 @@ class QNetwork(nn.Module):
             fused_embeds = attn_out.squeeze(1)  # (total_agents, H)
             assert fused_embeds.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {fused_embeds.shape}"
 
-            # Optionally set n=0 agents to their own embedding
-            for i, n in enumerate(neighbor_lens):
-                if n == 0:
-                    fused_embeds[i] = all_agent_embeds_tensor[i]
+            # # Optionally set n=0 agents to their own embedding
+            # for i, n in enumerate(neighbor_lens):
+            #     if n == 0:
+            #         fused_embeds[i] = all_agent_embeds_tensor[i]
 
             batch_enc = fused_embeds
 

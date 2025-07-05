@@ -125,6 +125,7 @@ class PairDataset(Dataset):
 def custom_collate(batch):
     # batch: list of (obs, neigh, neigh_coords, label)
     obs_list, neigh_list, neigh_coords_list, labels_list = zip(*batch)
+    batch_size = len(obs_list)
     # Stack observations into single tensor: (batch_size, 2, C, H, W)
     obs_batch = torch.stack(obs_list)
     # Labels tensor
@@ -133,7 +134,56 @@ def custom_collate(batch):
     neigh_batch = list(neigh_list)
     # neigh_coords_batch = list(neigh_coords_list)
     neigh_coords_batch = [element for sublist in neigh_coords_list for element in sublist]
-    return obs_batch, neigh_batch, neigh_coords_batch, labels_batch
+
+    fov = 81
+    device = obs_batch.device
+    batch_neighbor_patches = neigh_batch
+    all_neighbor_patches = []
+    neighbor_lens = []    # number of neighbors per agent
+    for neighbor_patches in batch_neighbor_patches:
+        patches_1 = neighbor_patches[0]
+        neighbor_lens.append(len(patches_1))
+        all_neighbor_patches.append(patches_1)
+
+        patches_2 = neighbor_patches[1]
+        neighbor_lens.append(len(patches_2))
+        all_neighbor_patches.append(patches_2)
+    # Pad neighbor lists to max_neighbors and stack
+    max_neighbors = max(neighbor_lens)
+    padded_neighbors = []
+    for patches in all_neighbor_patches:
+        n = len(patches)
+        if n < max_neighbors:
+            pad = torch.zeros((max_neighbors - n, 1, fov, fov), device=device)
+            padded_neighbors.append(torch.cat([patches, pad], dim=0))
+
+            pad = torch.zeros(max_neighbors - n, 2, device=device)
+        else:
+            padded_neighbors.append(patches)
+    # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
+    neigh_batch = torch.stack(padded_neighbors, dim=0).view(batch_size, 2, max_neighbors, 1, fov, fov)
+
+    batch_neigh_coords = neigh_coords_batch
+    pad_neigh_coord = []
+    for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
+        n = len(patches)
+        if n < max_neighbors:
+            pad = torch.zeros(max_neighbors - n, 2, device=device)
+            pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
+        else:
+            pad_neigh_coord.append(coord_patches)
+    pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0).view(batch_size, 2, max_neighbors, 2)
+    neigh_coords_batch = pad_neigh_coord
+
+    # ----------- Build mask for attention -------------
+    total_agents = len(obs_batch) * 2
+    mask = torch.zeros((total_agents, max_neighbors), dtype=torch.bool, device=device)
+    for i, n in enumerate(neighbor_lens):
+        if n < max_neighbors:
+            mask[i, n:] = True
+    mask = mask.view(batch_size, 2, max_neighbors)
+
+    return obs_batch, neigh_batch, neigh_coords_batch, labels_batch, mask
 
 # --- Training Loop ---
 def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None, train_set=None, test_set=None):
@@ -166,14 +216,14 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         for batch_n, batch in tqdm(enumerate(balanced_loader)):
             t0 = time.time()
 
-            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch = batch
+            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask = batch
             device = obs_fovs_batch.device
             labels_batch = labels_batch.to(device, non_blocking=True)
             batch_size = len(labels_batch)
 
             t1 = time.time()
 
-            _, batch_q_vals = model(obs_fovs_batch, [], neighbor_features_batch, neigh_coords_batch)
+            _, batch_q_vals = model(obs_fovs_batch, [], neighbor_features_batch, neigh_coords_batch, mask)
             batch_q_vals_flat = batch_q_vals
 
             loss = criterion(batch_q_vals_flat, labels_batch)
@@ -341,7 +391,7 @@ def main():
 
         # --- Model, Optimizer, Loss ---
         model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
-        # model = nn.DataParallel(model, device_ids=[0,1,2,3], output_device=0)
+        model = nn.DataParallel(model, device_ids=[0,1,2,3], output_device=0)
         optimizer = optim.Adam(model.parameters(), lr=LR)
         criterion = nn.CrossEntropyLoss()
 
