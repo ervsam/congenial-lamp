@@ -9,6 +9,7 @@ import yaml
 from collections import Counter, defaultdict
 import ast
 from tqdm import tqdm
+from collections import Counter as _Counter_pre
 
 import numpy as np
 import torch
@@ -25,7 +26,7 @@ from Model import QNetwork
 from utils import Logger, step
 
 class PairDataset(Dataset):
-    def __init__(self, data_txt, env):
+    def __init__(self, data_txt, env, undersample=True):
         self.env   = env
         self.pairs = []      # will hold (line_idx, a, b, label)
         self.raw_data = []
@@ -66,29 +67,27 @@ class PairDataset(Dataset):
                     self.pairs.append((line_idx, a, b, label))
 
         # Print class counts before undersampling
-        from collections import Counter as _Counter_pre
-        pre_counts = _Counter_pre([lbl for (_, _, _, lbl) in self.pairs])
+        pre_counts = Counter([lbl for (_, _, _, lbl) in self.pairs])
         print(f"PairDataset: class counts before undersampling: {{0}}={pre_counts[0]}, {{1}}={pre_counts[1]}, {{2}}={pre_counts[2]}")
-        # --- undersample to smallest class count ---
-        from collections import Counter
-        # count occurrences per label
-        label_counts = Counter([label for (_, _, _, label) in self.pairs])
-        min_count = min(label_counts.values())
-        # group indices by label
-        indices_by_label = {lbl: [] for lbl in label_counts}
-        for idx, (_, _, _, lbl) in enumerate(self.pairs):
-            indices_by_label[lbl].append(idx)
-        # sample min_count indices per label
-        import random
-        selected_indices = []
-        for lbl, idxs in indices_by_label.items():
-            selected_indices.extend(random.sample(idxs, min_count))
-        # rebuild pairs to undersampled set
-        self.pairs = [self.pairs[i] for i in selected_indices]
-        # Print class counts after undersampling
-        from collections import Counter as _Counter_post
-        post_counts = _Counter_post([lbl for (_, _, _, lbl) in self.pairs])
-        print(f"PairDataset: class counts after undersampling: {{0}}={post_counts[0]}, {{1}}={post_counts[1]}, {{2}}={post_counts[2]}")
+
+        if undersample:
+            # --- undersample to smallest class count ---
+            # count occurrences per label
+            label_counts = Counter([label for (_, _, _, label) in self.pairs])
+            min_count = min(label_counts.values())
+            # group indices by label
+            indices_by_label = {lbl: [] for lbl in label_counts}
+            for idx, (_, _, _, lbl) in enumerate(self.pairs):
+                indices_by_label[lbl].append(idx)
+            # sample min_count indices per label
+            selected_indices = []
+            for lbl, idxs in indices_by_label.items():
+                selected_indices.extend(random.sample(idxs, min_count))
+            # rebuild pairs to undersampled set
+            self.pairs = [self.pairs[i] for i in selected_indices]
+            # Print class counts after undersampling
+            post_counts = Counter([lbl for (_, _, _, lbl) in self.pairs])
+            print(f"PairDataset: class counts after undersampling: {{0}}={post_counts[0]}, {{1}}={post_counts[1]}, {{2}}={post_counts[2]}")
 
     def __len__(self):
         return len(self.pairs)
@@ -186,22 +185,33 @@ def custom_collate(batch):
     return obs_batch, neigh_batch, neigh_coords_batch, labels_batch, mask
 
 # --- Training Loop ---
-def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None, train_set=None, test_set=None):
+def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None):
     data = PairDataset(sample_file+'data.txt', env)
-
     balanced_loader = DataLoader(
         data,
         batch_size=BATCH_SIZE,
         collate_fn=custom_collate,
         shuffle=True,
-        num_workers=3,               # ← dispatch 4 workers in parallel
+        num_workers=8,               # ← dispatch 4 workers in parallel
         prefetch_factor=1,           # ← each worker will pre‐fetch 2 samples into its buffer
         persistent_workers=True,     # ← keep workers alive across epochs
         # pin_memory=True,             # ← stage CPU→GPU copies asynchronously
         multiprocessing_context=mp.get_context('spawn'),
     )
-
     print(f"Number of batches: {len(balanced_loader)}")
+
+    test_data = PairDataset(sample_file+'test_data.txt', env, undersample=True)
+    test_loader = DataLoader(
+        test_data,
+        batch_size=BATCH_SIZE,
+        collate_fn=custom_collate,
+        shuffle=False,
+        # num_workers=8,               # ← dispatch 4 workers in parallel
+        # prefetch_factor=1,           # ← each worker will pre‐fetch 2 samples into its buffer
+        # persistent_workers=True,     # ← keep workers alive across epochs
+        # # pin_memory=True,             # ← stage CPU→GPU copies asynchronously
+        # multiprocessing_context=mp.get_context('spawn'),
+    )
 
     model.train()
     best_acc = 0
@@ -269,10 +279,10 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         for cls, acc in enumerate(per_class_acc):
             writer.add_scalar(f'Accuracy/train_class_{cls}', acc, epoch)
 
-        # test_loss, test_acc, per_class_acc = evaluate(test_set_flatten, model, BATCH_SIZE, epoch, criterion, writer)
-        # print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
-        # writer.add_scalar('Loss/test', test_loss, epoch)
-        # writer.add_scalar('Accuracy/test', test_acc, epoch)
+        test_loss, test_acc, per_class_acc = evaluate(test_loader, model, BATCH_SIZE, epoch, criterion, writer)
+        print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
+        writer.add_scalar('Loss/test', test_loss, epoch)
+        writer.add_scalar('Accuracy/test', test_acc, epoch)
 
         acc_1_2 = (per_class_acc[0] + per_class_acc[1]) / 2
         if acc_1_2 > best_acc:
@@ -287,7 +297,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
     return best_acc
 
 # --- Evaluation ---
-def evaluate(dataset, model, batch_size, epoch, criterion, writer):
+def evaluate(test_loader, model, batch_size, epoch, criterion, writer):
     model.eval()
     total_loss = 0
     total_correct = 0
@@ -296,14 +306,13 @@ def evaluate(dataset, model, batch_size, epoch, criterion, writer):
     all_labels = []
 
     with torch.no_grad():
-        for i in range(0, len(dataset), batch_size):
-            batch = dataset[i:i+batch_size]
-            if not batch:
-                continue
-            obs_pair, neigh, neigh_coords, labels = custom_collate(batch)
+        for batch_n, batch in tqdm(enumerate(test_loader)):
+            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask = batch
+            device = obs_fovs_batch.device
+            labels = labels_batch.to(device, non_blocking=True)
 
             # Forward pass
-            logits = model(obs_pair, [], neigh, neigh_coords)
+            logits = model(obs_fovs_batch, [], neighbor_features_batch, neigh_coords_batch, mask)
             # If model returns (encodings, logits), grab only logits
             if isinstance(logits, tuple):
                 logits = logits[1] if len(logits) > 1 else logits[0]
@@ -320,7 +329,7 @@ def evaluate(dataset, model, batch_size, epoch, criterion, writer):
             all_preds.extend(pred.cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
-    avg_loss = total_loss / len(dataset)
+    avg_loss = total_loss / len(test_loader)
     accuracy = total_correct / total_pred if total_pred > 0 else 0.0
     macro_f1 = f1_score(all_labels, all_preds, average='macro')
 
@@ -391,7 +400,8 @@ def main():
 
         # --- Model, Optimizer, Loss ---
         model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
-        model = nn.DataParallel(model, device_ids=[0,1,2,3], output_device=0)
+        # model = nn.DataParallel(model, device_ids=[0,1,2,3], output_device=0)
+        model = nn.DataParallel(model)
         optimizer = optim.Adam(model.parameters(), lr=LR)
         criterion = nn.CrossEntropyLoss()
 
