@@ -750,3 +750,38 @@ TODO:
 
 2. getting results for w=20 using model
 > result_70 w20
+
+## 6 JUL 2025
+1. model forward should take 0.01
+- move reshape and slicing out of forward()
+
+## 17 JUL 2025
+1. getting results for pbs model on 250 agents
+- threshold 0.5
+- RESULTS:
+    - RHCR error, agent jumped, only ran for 185 time steps
+    - but on average during that 185 time steps, it performed better
+
+## 18 JUL 2025
+1. RHCR error, drive jump, because wasnt able to create root node, because couldnt find path
+- prioritize_start=true allowed conflicts to persist. when set to false, lower prio agent cant find a path avoiding higher agent j
+- solution: comment out find_consistent_paths in generate node?
+    - but that doesnt solve the problem of a lower agent i cant find a path away from higher agent j
+- solution: resample priority pairs by increasing threshold
+
+## 26 JUL 2025
+model stopped training here:
+Test accuracy per class: 0.575, 0.564, 0.777,
+that is better than random prediction since random would give accuracy of 0.33
+
+Question 1: why is class 2 more accurate even though the number of samples used is the same?
+
+using the model for testing:
+threshold 0.6: unable to generate root node at some point
+threshold 0.7: unable to generate root node at some point
+threshold 0.8:
+- average predicted pairs: 74.062
+- average HL_num_expanded: from 360.980 to 329.778 (not much improvement)
+- average initial num_of_collisions: from 563.072 to 493.850 (not much improvement)
+- runtime increased (not good, TODO figure out why)
+

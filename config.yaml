@@ -2,13 +2,13 @@ warehouse_2:
   root: "results/"
 
   environment:
-    NUM_AGENTS: 250
+    NUM_AGENTS: 140
     WINDOW_SIZE: 20
     FOV: 81 # WINDOW_SIZE * 4 + 1
   
   training:
     N_ACTIONS: 3
-    DEVICE: "cuda:0"
+    DEVICE: "cuda:7"
     BATCH_SIZE: 64
     LR: 1e-4
     EPOCHS: 100

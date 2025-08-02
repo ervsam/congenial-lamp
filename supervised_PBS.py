@@ -9,21 +9,24 @@ import yaml
 from collections import Counter, defaultdict
 import ast
 from tqdm import tqdm
-from collections import Counter as _Counter_pre
-
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
+import torch.multiprocessing as mp
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import f1_score
-import torch.multiprocessing as mp
+from torch.nn.utils.rnn import pad_sequence
+
 
 from Environment import Environment
 from Model import QNetwork
-from utils import Logger, step
+from utils import Logger
+
+device = torch.device('cuda:7' if torch.cuda.is_available() else 'cpu')
 
 class PairDataset(Dataset):
     def __init__(self, data_txt, env, undersample=True):
@@ -37,7 +40,7 @@ class PairDataset(Dataset):
         assert (row, col) == (33, 46)
 
         with open(data_txt) as f:
-            print("Reading from data.txt...")
+            print(f"Reading from {data_txt}...")
             for line_idx, line in tqdm(enumerate(f)):
                 starts_str, goals_str, priorities_str = line.split(';')
                 starts = ast.literal_eval(starts_str)
@@ -93,96 +96,56 @@ class PairDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx):
+        # t0 = time.time()
         line_idx, a, b, label = self.pairs[idx]
         starts, goals, priorities = self.raw_data[line_idx]
-
         self.env.starts = starts
         self.env.goals = goals
-        t0 = time.time()
-        self.env.DHC_heur = self.env._get_DHC_heur()
-        # print(f"_get_DHC_heur time: {time.time() - t0:.3f}s")
 
-        t_obs = time.time()
+        # t2 = time.time()
         obs_fovs = self.env.get_obs([a, b])
-        # print(f"get_obs time: {time.time() - t_obs:.3f}s")
+        # print(f"obs_fovs: {time.time()-t2:0.4f}")
+        # t3 = time.time()
+        neighbor_features, neighbor_coords = self.env.get_neighbor_goal_heuristics_as_patches([a, b])
+        # print(f"get_neighbor_goal_heuristics_as_patches: {time.time()-t3:0.4f}")
 
-        t_nf = time.time()
-        neighbor_features_and_coord = self.env.get_neighbor_goal_heuristics_as_patches([a, b])
-        # print(f"get_neighbor_goal_heuristics time: {time.time() - t_nf:.3f}s")
+        # Pad neighbor lists to fixed size = num_agents-1
+        max_nb = self.env.num_agents - 1
+        # obs_fovs is shape (2, C, fov, fov)
+        # build tensor for neighbors: (2, max_nb, 1, fov, fov)
+        padded_feats = torch.zeros((2, max_nb, 1, self.env.fov, self.env.fov), dtype=torch.float32)
+        padded_coords = torch.zeros((2, max_nb, 2), dtype=torch.float32)
+        mask = torch.ones((2, max_nb), dtype=torch.bool)
+        for i, feats in enumerate(neighbor_features):
+            n = feats.size(0)
+            if n > max_nb:
+                feats = feats[:max_nb]
+                coords = neighbor_coords[i][:max_nb]
+                n = max_nb
+            else:
+                coords = neighbor_coords[i]
+            if n > 0:
+                padded_feats[i, :n] = feats
+                padded_coords[i, :n] = coords
+                mask[i, :n] = False
 
-        obs = torch.stack([obs_fovs[0], obs_fovs[1]])  # shape (2, C, H, W)
+        # print(f"total getitem: {time.time()-t0:.04f}")
+        return obs_fovs, padded_feats, padded_coords, mask, label
 
-        neigh = [
-            torch.stack([n[0] for n in neigh]) if len(neigh) > 0 else None
-            for neigh in neighbor_features_and_coord
-        ]
-        
-        neigh_coords = [torch.stack([n[1] for n in neigh])for neigh in neighbor_features_and_coord]
-
-        return obs, neigh, neigh_coords, label
 
 def custom_collate(batch):
-    # batch: list of (obs, neigh, neigh_coords, label)
-    obs_list, neigh_list, neigh_coords_list, labels_list = zip(*batch)
-    batch_size = len(obs_list)
-    # Stack observations into single tensor: (batch_size, 2, C, H, W)
+    # Unzip batch
+    # t0 = time.time()
+    obs_list, neigh_list, neigh_coords_list, mask_list, labels_list = zip(*batch)
+
     obs_batch = torch.stack(obs_list)
-    # Labels tensor
+    neigh_batch = torch.stack(neigh_list, dim=0)
+    neigh_coords_batch = torch.stack(neigh_coords_list, dim=0)
     labels_batch = torch.tensor(labels_list)
-    # neigh_list is a tuple of lists [nbatch of [tensor,...], ...], convert to list
-    neigh_batch = list(neigh_list)
-    # neigh_coords_batch = list(neigh_coords_list)
-    neigh_coords_batch = [element for sublist in neigh_coords_list for element in sublist]
+    mask_batch = torch.stack(mask_list, dim=0)
 
-    fov = 81
-    device = obs_batch.device
-    batch_neighbor_patches = neigh_batch
-    all_neighbor_patches = []
-    neighbor_lens = []    # number of neighbors per agent
-    for neighbor_patches in batch_neighbor_patches:
-        patches_1 = neighbor_patches[0]
-        neighbor_lens.append(len(patches_1))
-        all_neighbor_patches.append(patches_1)
-
-        patches_2 = neighbor_patches[1]
-        neighbor_lens.append(len(patches_2))
-        all_neighbor_patches.append(patches_2)
-    # Pad neighbor lists to max_neighbors and stack
-    max_neighbors = max(neighbor_lens)
-    padded_neighbors = []
-    for patches in all_neighbor_patches:
-        n = len(patches)
-        if n < max_neighbors:
-            pad = torch.zeros((max_neighbors - n, 1, fov, fov), device=device)
-            padded_neighbors.append(torch.cat([patches, pad], dim=0))
-
-            pad = torch.zeros(max_neighbors - n, 2, device=device)
-        else:
-            padded_neighbors.append(patches)
-    # shape: (total_agents, max_neighbors, 1, self.fov, self.fov)
-    neigh_batch = torch.stack(padded_neighbors, dim=0).view(batch_size, 2, max_neighbors, 1, fov, fov)
-
-    batch_neigh_coords = neigh_coords_batch
-    pad_neigh_coord = []
-    for patches, coord_patches in zip(all_neighbor_patches, batch_neigh_coords):
-        n = len(patches)
-        if n < max_neighbors:
-            pad = torch.zeros(max_neighbors - n, 2, device=device)
-            pad_neigh_coord.append(torch.cat([coord_patches, pad], dim=0))
-        else:
-            pad_neigh_coord.append(coord_patches)
-    pad_neigh_coord = torch.stack(pad_neigh_coord, dim=0).view(batch_size, 2, max_neighbors, 2)
-    neigh_coords_batch = pad_neigh_coord
-
-    # ----------- Build mask for attention -------------
-    total_agents = len(obs_batch) * 2
-    mask = torch.zeros((total_agents, max_neighbors), dtype=torch.bool, device=device)
-    for i, n in enumerate(neighbor_lens):
-        if n < max_neighbors:
-            mask[i, n:] = True
-    mask = mask.view(batch_size, 2, max_neighbors)
-
-    return obs_batch, neigh_batch, neigh_coords_batch, labels_batch, mask
+    # print(f"custom_collate: {time.time()-t0:.04f}")
+    return obs_batch, neigh_batch, neigh_coords_batch, labels_batch, mask_batch
 
 # --- Training Loop ---
 def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None):
@@ -192,11 +155,9 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         batch_size=BATCH_SIZE,
         collate_fn=custom_collate,
         shuffle=True,
-        num_workers=8,               # ← dispatch 4 workers in parallel
-        prefetch_factor=1,           # ← each worker will pre‐fetch 2 samples into its buffer
-        persistent_workers=True,     # ← keep workers alive across epochs
-        # pin_memory=True,             # ← stage CPU→GPU copies asynchronously
-        multiprocessing_context=mp.get_context('spawn'),
+        # num_workers=8,
+        pin_memory=True,
+        # persistent_workers=True
     )
     print(f"Number of batches: {len(balanced_loader)}")
 
@@ -206,64 +167,93 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         batch_size=BATCH_SIZE,
         collate_fn=custom_collate,
         shuffle=False,
-        # num_workers=8,               # ← dispatch 4 workers in parallel
-        # prefetch_factor=1,           # ← each worker will pre‐fetch 2 samples into its buffer
-        # persistent_workers=True,     # ← keep workers alive across epochs
-        # # pin_memory=True,             # ← stage CPU→GPU copies asynchronously
-        # multiprocessing_context=mp.get_context('spawn'),
+        pin_memory=True,
     )
 
     model.train()
     best_acc = 0
     for epoch in range(train_epochs):
         print(f"Training epoch {epoch + 1}/{train_epochs}...")
-        total_loss = 0
-        total_correct = 0
+        total_loss = torch.tensor(0.0, dtype=torch.float32, device=device)
+        # accumulate correct counts on GPU to avoid sync per-batch
+        total_correct_tensor = torch.tensor(0, device=device)
         total_pred = 0
-        all_preds = []
-        all_labels = []
+        # Use tensor lists for efficient batch aggregation
+        all_pred_tensors = []
+        all_label_tensors = []
 
         for batch_n, batch in tqdm(enumerate(balanced_loader)):
-            t0 = time.time()
-
             obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask = batch
-            device = obs_fovs_batch.device
+            # t0 = time.perf_counter()
+
+            # Measure individual transfer times
+            obs_fovs_batch = obs_fovs_batch.to(device, non_blocking=True)
+            neighbor_features_batch = neighbor_features_batch.to(device, non_blocking=True)
+            neigh_coords_batch = neigh_coords_batch.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
             labels_batch = labels_batch.to(device, non_blocking=True)
-            batch_size = len(labels_batch)
+            # print(f"to device: {time.perf_counter()-t0:.04f}")
 
-            t1 = time.time()
+            # Forward pass
+            # t2 = time.perf_counter()
+            _, batch_q_vals = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
+            # print(f"forward: {time.perf_counter()-t2:.04f}")
 
-            _, batch_q_vals = model(obs_fovs_batch, [], neighbor_features_batch, neigh_coords_batch, mask)
-            batch_q_vals_flat = batch_q_vals
-
-            loss = criterion(batch_q_vals_flat, labels_batch)
+            # t3 = time.perf_counter()
+            loss = criterion(batch_q_vals, labels_batch)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            # print(f"backward: {time.perf_counter()-t3:.04f}")
 
-            t3 = time.time()
+            # torch.cuda.synchronize()
+            # _t0 = time.perf_counter()
+            pred = torch.argmax(batch_q_vals, dim=1)
+            # torch.cuda.synchronize()
+            # _t1 = time.perf_counter()
+            correct_tensor = (pred == labels_batch).sum()
+            # torch.cuda.synchronize()
+            # _t2 = time.perf_counter()
+            # _ta = time.perf_counter()
+            batch_n = obs_fovs_batch.size(0)
+            # _tb = time.perf_counter()
+            total_correct_tensor += correct_tensor
+            # _tc = time.perf_counter()
+            total_pred += batch_n
+            # _td = time.perf_counter()
+            total_loss += loss * batch_n
+            # _te = time.perf_counter()
+            all_pred_tensors.append(pred)
+            # _tf = time.perf_counter()
+            all_label_tensors.append(labels_batch)
+            # _tg = time.perf_counter()
+            # print(
+            #     f"pred={_t1-_t0:.6f}s, "
+            #     f"correct_tensor={_t2-_t1:.6f}s, "
+            #     f"batch_n={_tb-_ta:.6f}s, "
+            #     f"correct_update={_tc-_tb:.6f}s, "
+            #     f"pred_count_update={_td-_tc:.6f}s, "
+            #     f"loss_update={_te-_td:.6f}s, "
+            #     f"append_pred={_tf-_te:.6f}s, "
+            #     f"append_label={_tg-_tf:.6f}s"
+            # )
 
-            pred = torch.argmax(batch_q_vals_flat, dim=1)
-            correct = (pred == labels_batch).sum().item()
-            total_correct += correct
-            total_pred += batch_size
-            total_loss += loss.item() * batch_size
+            # print(f"total forward: {time.perf_counter()-t0:.04f}")
 
-            all_preds.extend(pred.cpu().tolist())
-            all_labels.extend(labels_batch.cpu().tolist())
-
-            # print(f"Batch {batch_n}: load={t1-t0:.3f}s, forward+back={t3-t1:.3f}s")
-
+        # finalize correct count once, causing a single sync
+        total_correct = total_correct_tensor.item()
+        total_loss = total_loss.item()
+        # Concatenate and move to CPU only once
+        all_preds = torch.cat(all_pred_tensors).cpu().tolist()
+        all_labels = torch.cat(all_label_tensors).cpu().tolist()
         accuracy = total_correct / total_pred if total_pred > 0 else 0.0
         macro_f1 = f1_score(all_labels, all_preds, average='macro')
         all_preds_np = np.array(all_preds)
         all_labels_np = np.array(all_labels)
         num_classes = len(set(all_labels_np))
-
         print(f"Epoch {epoch+1} | Avg Loss: {total_loss/total_pred:.4f} | Accuracy: {accuracy:.4f} | F1: {macro_f1:.4f}")
         writer.add_scalar('Loss/train', total_loss / total_pred, epoch)
         writer.add_scalar('Accuracy/train', accuracy, epoch)
-
         print(f"Train accuracy per class: ", end='')
         per_class_acc = []
         for cls in range(num_classes):
@@ -275,15 +265,12 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             per_class_acc.append(acc)
             print(f"{acc:.3f}, ", end='')
         print()
-
         for cls, acc in enumerate(per_class_acc):
             writer.add_scalar(f'Accuracy/train_class_{cls}', acc, epoch)
-
         test_loss, test_acc, per_class_acc = evaluate(test_loader, model, BATCH_SIZE, epoch, criterion, writer)
         print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
         writer.add_scalar('Loss/test', test_loss, epoch)
         writer.add_scalar('Accuracy/test', test_acc, epoch)
-
         acc_1_2 = (per_class_acc[0] + per_class_acc[1]) / 2
         if acc_1_2 > best_acc:
             best_acc = acc_1_2
@@ -292,7 +279,6 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             print(f"Model saved as {model_file}")
         else:
             print(f"Best accuracy is still {best_acc:.4f}")
-
         print()
     return best_acc
 
@@ -308,11 +294,17 @@ def evaluate(test_loader, model, batch_size, epoch, criterion, writer):
     with torch.no_grad():
         for batch_n, batch in tqdm(enumerate(test_loader)):
             obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask = batch
-            device = obs_fovs_batch.device
-            labels = labels_batch.to(device, non_blocking=True)
+
+            obs_fovs_batch = obs_fovs_batch.to(device, non_blocking=True)
+            neighbor_features_batch = neighbor_features_batch.to(device, non_blocking=True)
+            neigh_coords_batch = neigh_coords_batch.to(device, non_blocking=True)
+            mask = mask.to(device, non_blocking=True)
+            labels_batch = labels_batch.to(device, non_blocking=True)
+
+            labels = labels_batch
 
             # Forward pass
-            logits = model(obs_fovs_batch, [], neighbor_features_batch, neigh_coords_batch, mask)
+            logits = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
             # If model returns (encodings, logits), grab only logits
             if isinstance(logits, tuple):
                 logits = logits[1] if len(logits) > 1 else logits[0]
@@ -400,8 +392,8 @@ def main():
 
         # --- Model, Optimizer, Loss ---
         model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
-        # model = nn.DataParallel(model, device_ids=[0,1,2,3], output_device=0)
-        model = nn.DataParallel(model)
+        # model = nn.DataParallel(model, device_ids=[1,2,3,4,5,6,7], output_device=1)
+        # model = nn.DataParallel(model)
         optimizer = optim.Adam(model.parameters(), lr=LR)
         criterion = nn.CrossEntropyLoss()
 
@@ -411,19 +403,10 @@ def main():
 
         writer.close()
 
-        # --- Run Evaluation on Test Set ---
-        model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
-        model.load_state_dict(torch.load(model_file, map_location=DEVICE))
-        with open(sample_file + 'test_samples.pkl', 'rb') as f:
-            test_set_flatten = pickle.load(f)
-        test_loss, test_acc, per_class_acc = evaluate(test_set_flatten, model, BATCH_SIZE, EPOCHS+1, criterion)
-        print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
-
     except Exception as e:
         print(f"\nException caught: {e}\nStarting pdb...")
         pdb.post_mortem()
         sys.exit(1)
-
 
 if __name__ == '__main__':
     from multiprocessing import freeze_support
