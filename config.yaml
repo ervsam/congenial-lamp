@@ -8,7 +8,7 @@ warehouse_2:
   
   training:
     N_ACTIONS: 3
-    DEVICE: "cuda:7"
+    DEVICE: "cuda:5"
     BATCH_SIZE: 64
     LR: 1e-4
     EPOCHS: 100

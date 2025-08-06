@@ -96,6 +96,9 @@ class QNetwork(nn.Module):
             nn.Linear(self.hid_dim, self.num_actions),
         )
 
+        self.bin_fc       = nn.Linear(self.hid_dim * 2, 1)    # binary logit
+        self.dir_fc       = nn.Linear(self.hid_dim * 2, 2)    # class-0 vs class-1
+
         # New: Neighbor attention module (can use MultiheadAttention)
         self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=2, batch_first=True)
 
@@ -183,8 +186,11 @@ class QNetwork(nn.Module):
         pair_enc_per_ep = batch_enc.view(batch_size, 2 * hid_dim)
 
         # pair_q   = self.qnet(pair_enc)               # (n_pairs, 2)
-        qvals_per_ep = self.qnet(pair_enc_per_ep)
+        # qvals_per_ep = self.qnet(pair_enc_per_ep)
+
+        bin_logits = self.bin_fc(pair_enc_per_ep).squeeze(-1)        # (B,)
+        dir_logits = self.dir_fc(pair_enc_per_ep)                  # (B,2)
 
         # assert len(qvals_per_ep) == batch_size, f"Expected {batch_size}, got {len(qvals_per_ep)}"
         # assert qvals_per_ep[0].shape[1] == self.num_actions, f"Expected {self.num_actions}, got {qvals_per_ep[0].shape[1]}"
-        return pair_enc_per_ep, qvals_per_ep
+        return pair_enc_per_ep, bin_logits, dir_logits

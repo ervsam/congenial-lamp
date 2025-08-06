@@ -124,42 +124,32 @@ class Environment:
             _DHC_heur_map[goal] = dhc
 
         pad = self.fov // 2
-        # (a) Build one giant CPU tensor of shape (G, 1, H+2pad, W+2pad)
-        #     where G = number of unique goals
+        self.heuristic_map_array = np.array(list(self.heuristic_map.values()), dtype=np.float32)  # (G, H+2pad, W+2pad)
+        # (a) Build one giant CPU tensor of shape (G, 1, H+2pad, W+2pad) where G = number of unique goals
         _goal_list = list(self.heuristic_map.keys())
-        maps = []
-        for goal in _goal_list:
-            arr = self.heuristic_map[goal].astype(np.float32)
-            maps.append(np.pad(arr, pad_width=pad, mode='constant', constant_values=np.inf))
-        # Stack once and move to device
-        self._padded_maps = torch.from_numpy(np.stack(maps, axis=0)).unsqueeze(1)  # (G,1,H',W')
+        # maps = []
+        # for goal in _goal_list:
+        #     arr = self.heuristic_map[goal].astype(np.float32)
+        #     maps.append(np.pad(arr, pad_width=pad, mode='constant', constant_values=np.inf))
+        # # Stack once and move to device
+        # self._padded_maps = torch.from_numpy(np.stack(maps, axis=0)).unsqueeze(1)  # (G,1,H',W')
         # (b) A lookup from goal→index in that tensor
         self._goal_index = {g:i for i,g in enumerate(_goal_list)}
-
-        # # --------- Precompute static windows for get_obs ---------
-        # # 2. Heuristic windows for each goal in _goal_list
-        # _heur_windows = _padded_maps.unfold(2, self.fov, 1).unfold(3, self.fov, 1)  # (G,1,H,W,fov,fov)
-        # # Precompute per-location max for each fov window and normalize windows
-        # # Replace inf in padded maps with zero so max_pool ignores them
-        # finite_maps = _padded_maps.clone()
-        # finite_maps[finite_maps == float('inf')] = 0.0
-        # # max_pool2d over fov window, stride 1 → (G,1,H,W)
-        # heur_max = F.max_pool2d(finite_maps, kernel_size=self.fov, stride=1).clamp(min=1.0)
-        # # normalize each window: broadcast heur_max into last two dims
-        # self._norm_heur_windows = _heur_windows / heur_max[..., None, None]
         
         # 3. DHC windows for each goal in _goal_list, shape (G,4,H,W,fov,fov)
-        dhc_wins = []
-        for goal in tqdm(_goal_list):
-            # shape (4,H,W)
-            arr = _DHC_heur_map[goal].astype(np.float32)
-            t = torch.from_numpy(arr)  # (4,H,W)
-            t = F.pad(t, (pad, pad, pad, pad))  # (4,H',W')
-            # unfold for each direction: (4,H',W') -> (4,H,W,fov,fov)
-            t_unf = t.unfold(1, self.fov, 1).unfold(2, self.fov, 1)  # (4,H,W,fov,fov)
-            dhc_wins.append(t_unf)
-        # Keep full DHC windows on CPU to avoid GPU OOM; move slices to GPU in get_obs
-        self._dhc_windows = torch.stack(dhc_wins, dim=0).cpu()
+        self.DHC_heur_arr = np.array(list(_DHC_heur_map.values()), dtype=np.float32)
+
+        # dhc_wins = []
+        # for goal in tqdm(_goal_list):
+        #     # shape (4,H,W)
+        #     arr = _DHC_heur_map[goal].astype(np.float32)
+        #     t = torch.from_numpy(arr)  # (4,H,W)
+        #     t = F.pad(t, (pad, pad, pad, pad))  # (4,H',W')
+        #     # unfold for each direction: (4,H',W') -> (4,H,W,fov,fov)
+        #     t_unf = t.unfold(1, self.fov, 1).unfold(2, self.fov, 1)  # (4,H,W,fov,fov)
+        #     dhc_wins.append(t_unf)
+        # # Keep full DHC windows on CPU to avoid GPU OOM; move slices to GPU in get_obs
+        # self._dhc_windows = torch.stack(dhc_wins, dim=0).cpu()
 
 
     def _get_start_locs(self):
@@ -258,7 +248,13 @@ class Environment:
             obs_fovs_cpu[i, 2] = norm
 
             g_idx = self._goal_index[ goals0[i] ]
-            all4 = self._dhc_windows[ g_idx, :, y0, x0 ]   # → shape (4, fov, fov)
+            # all4 = self._dhc_windows[ g_idx, :, y0, x0 ]   # → shape (4, fov, fov)
+
+            arr = self.DHC_heur_arr[g_idx]
+            t = torch.from_numpy(arr)  # (4,H,W)
+            t = F.pad(t, (pad, pad, pad, pad))  # (4,H',W')
+            all4 = t[:, y0:y0+fov, x0:x0+fov]
+            
             obs_fovs_cpu[i, 3:7] = all4
 
         # 7) Coordinate channel (CPU)
@@ -287,7 +283,12 @@ class Environment:
 
             nbrs = self._get_neighboring_agents(agent)
             goal_idxs = [self._goal_index[self.goals[nbr][0]] for nbr in nbrs]
-            tmap = self._padded_maps[goal_idxs, 0]
+
+            # tmap = self._padded_maps[goal_idxs, 0]
+            arr = self.heuristic_map_array[goal_idxs]
+            arr = np.pad(arr, pad_width=((0,0), (pad,pad), (pad,pad)), mode='constant', constant_values=np.inf)
+            tmap = torch.from_numpy(arr)
+
             patch = tmap[:, y_agent : y_agent + fov, x_agent : x_agent + fov]
             mask = patch != float('inf')
             finite = patch.masked_fill(~mask, 0.0)

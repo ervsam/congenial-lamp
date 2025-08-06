@@ -26,7 +26,7 @@ from Environment import Environment
 from Model import QNetwork
 from utils import Logger
 
-device = torch.device('cuda:7' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:5' if torch.cuda.is_available() else 'cpu')
 
 class PairDataset(Dataset):
     def __init__(self, data_txt, env, undersample=True):
@@ -149,6 +149,8 @@ def custom_collate(batch):
 
 # --- Training Loop ---
 def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None):
+    bce_loss, dir_loss = criterion
+
     data = PairDataset(sample_file+'data.txt', env)
     balanced_loader = DataLoader(
         data,
@@ -196,36 +198,82 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
 
             # Forward pass
             # t2 = time.perf_counter()
-            _, batch_q_vals = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
+            # _, batch_q_vals = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
+            _, bin_logits, dir_logits = model(obs_fovs_batch,
+                                        neighbor_features_batch,
+                                        neigh_coords_batch,
+                                        mask)
             # print(f"forward: {time.perf_counter()-t2:.04f}")
 
-            # t3 = time.perf_counter()
-            loss = criterion(batch_q_vals, labels_batch)
+            # 1) build binary labels: classes 0 or 1 → 1, class 2 → 0
+            # labels_batch is shape (B,), with values in {0,1,2}
+            bin_labels = (labels_batch < 2).float()               # shape (B,)
+            # 2) direction labels: only meaningful where bin_labels==1
+            # we'll still keep tensor of shape (B,) but only compute CE on idxs
+            dir_labels = labels_batch.clone()
+            dir_labels[dir_labels == 2] = 0                       # placeholder for “no-priority” rows
+            # 3) compute losses
+            loss_bin = bce_loss(bin_logits, bin_labels)
+            # pick out only the priority examples for the direction loss
+            mask_prio = bin_labels.bool()                         # shape (B,)
+            if mask_prio.any():
+                # dir_logits[mask_prio] has shape (P,2), dir_labels[mask_prio] is (P,)
+                loss_dir = dir_loss(dir_logits[mask_prio], dir_labels[mask_prio])
+            else:
+                loss_dir = torch.tensor(0.0, device=obs_fovs_batch.device)
+            # 4) combine
+            # You can weight them differently if you like:
+            loss = loss_bin + loss_dir
+            # backward as before
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
+            # t3 = time.perf_counter()
+            # loss = criterion(batch_q_vals, labels_batch)
+            # optimizer.zero_grad()
+            # loss.backward()
+            # optimizer.step()
             # print(f"backward: {time.perf_counter()-t3:.04f}")
 
-            # torch.cuda.synchronize()
-            # _t0 = time.perf_counter()
-            pred = torch.argmax(batch_q_vals, dim=1)
-            # torch.cuda.synchronize()
-            # _t1 = time.perf_counter()
+            # After you compute bin_logits (shape [B]) and dir_logits (shape [B,2]):
+            # 1) Binary prediction: 1 if we think it’s priority (i.e. class 0 or 1), 0 if “no priority” (class 2)
+            bin_pred = (torch.sigmoid(bin_logits) > 0.5).long()    # [B], values in {0,1}
+            # 2) Direction prediction among the priority examples
+            dir_pred = torch.argmax(dir_logits, dim=1)            # [B], values in {0,1}
+            # 3) Fuse into a single 3-way prediction:
+            #    wherever bin_pred==0 → class 2, else → dir_pred (0 or 1)
+            default_no_prio = torch.full_like(bin_pred, 2)        # [B] all-2
+            pred = torch.where(bin_pred == 1, dir_pred, default_no_prio)
+            # now `pred` is shape [B], values in {0,1,2}
+            # 4) Compare to the true labels_batch
             correct_tensor = (pred == labels_batch).sum()
-            # torch.cuda.synchronize()
-            # _t2 = time.perf_counter()
-            # _ta = time.perf_counter()
-            batch_n = obs_fovs_batch.size(0)
-            # _tb = time.perf_counter()
+            batch_n       = labels_batch.size(0)
             total_correct_tensor += correct_tensor
-            # _tc = time.perf_counter()
-            total_pred += batch_n
-            # _td = time.perf_counter()
-            total_loss += loss * batch_n
-            # _te = time.perf_counter()
+            total_pred           += batch_n
             all_pred_tensors.append(pred)
-            # _tf = time.perf_counter()
             all_label_tensors.append(labels_batch)
+
+            # # torch.cuda.synchronize()
+            # # _t0 = time.perf_counter()
+            # pred = torch.argmax(batch_q_vals, dim=1)
+            # # torch.cuda.synchronize()
+            # # _t1 = time.perf_counter()
+            # correct_tensor = (pred == labels_batch).sum()
+            # # torch.cuda.synchronize()
+            # # _t2 = time.perf_counter()
+            # # _ta = time.perf_counter()
+            # batch_n = obs_fovs_batch.size(0)
+            # # _tb = time.perf_counter()
+            # total_correct_tensor += correct_tensor
+            # # _tc = time.perf_counter()
+            # total_pred += batch_n
+            # # _td = time.perf_counter()
+            # total_loss += loss * batch_n
+            # # _te = time.perf_counter()
+            # all_pred_tensors.append(pred)
+            # # _tf = time.perf_counter()
+            # all_label_tensors.append(labels_batch)
             # _tg = time.perf_counter()
             # print(
             #     f"pred={_t1-_t0:.6f}s, "
@@ -285,6 +333,8 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
 # --- Evaluation ---
 def evaluate(test_loader, model, batch_size, epoch, criterion, writer):
     model.eval()
+    bce_loss, dir_loss = criterion
+
     total_loss = 0
     total_correct = 0
     total_pred = 0
@@ -301,25 +351,42 @@ def evaluate(test_loader, model, batch_size, epoch, criterion, writer):
             mask = mask.to(device, non_blocking=True)
             labels_batch = labels_batch.to(device, non_blocking=True)
 
-            labels = labels_batch
-
             # Forward pass
-            logits = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
-            # If model returns (encodings, logits), grab only logits
-            if isinstance(logits, tuple):
-                logits = logits[1] if len(logits) > 1 else logits[0]
+            outputs = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
+            # model should now return something like (encodings, bin_logits, dir_logits)
+            if isinstance(outputs, tuple) and len(outputs) == 3:
+                _, bin_logits, dir_logits = outputs
+            else:
+                raise RuntimeError("Expected model to return (enc, bin_logits, dir_logits)")
+            # --- build the two sets of ground‐truth labels ---
+            # binary: 1 for classes {0,1}, 0 for class 2
+            bin_labels = (labels_batch < 2).float()  # [B]
+            # direction: only meaningful where bin_labels==1; just reuse labels 0/1
+            dir_labels = labels_batch.clone()
+            dir_labels[dir_labels == 2] = 0          # dummy for the “no‐priority” rows
 
-            loss = criterion(logits, labels)
+            # --- compute losses ---
+            loss_b = bce_loss(bin_logits.view(-1), bin_labels)
+            mask_prio = bin_labels.bool()
+            if mask_prio.any():
+                loss_d = dir_loss(dir_logits[mask_prio], dir_labels[mask_prio])
+            else:
+                loss_d = torch.tensor(0.0, device=device)
+            loss = loss_b + loss_d
 
-            pred = torch.argmax(logits, dim=1)
-            correct = (pred == labels).sum().item()
+            # accumulate
+            total_loss    += loss.item()
+            total_pred     += labels_batch.size(0)
 
-            total_correct += correct
-            total_pred += labels.size(0)
-            total_loss += loss.item()
+            # --- reconstruct final 3‐way prediction ---
+            bin_pred   = (torch.sigmoid(bin_logits) > 0.5).long()   # [B] in {0,1}
+            dir_pred   = torch.argmax(dir_logits, dim=1)           # [B] in {0,1}
+            fallback2  = torch.full_like(bin_pred, 2)              # [B] all‐2
+            pred       = torch.where(bin_pred == 1, dir_pred, fallback2)
 
-            all_preds.extend(pred.cpu().tolist())
-            all_labels.extend(labels.cpu().tolist())
+            total_correct += (pred == labels_batch).sum().item()
+            all_preds.extend (pred.cpu().tolist())
+            all_labels.extend(labels_batch.cpu().tolist())
 
     avg_loss = total_loss / len(test_loader)
     accuracy = total_correct / total_pred if total_pred > 0 else 0.0
@@ -387,15 +454,21 @@ def main():
         sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{NUM_AGENTS}/w{WINDOW_SIZE}/')
 
         USE_NEIGHCOORDS = True
-        model_file = f"sup_pbs_{NUM_AGENTS}_w{WINDOW_SIZE}.pth"
-        writer = SummaryWriter(log_dir=f"runs/with_neighcoords/w{WINDOW_SIZE}/{NUM_AGENTS}")
+        model_file = f"sup_pbs_{NUM_AGENTS}_w{WINDOW_SIZE}_binary.pth"
+        writer = SummaryWriter(log_dir=f"runs/binary/w{WINDOW_SIZE}/{NUM_AGENTS}")
 
         # --- Model, Optimizer, Loss ---
         model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
         # model = nn.DataParallel(model, device_ids=[1,2,3,4,5,6,7], output_device=1)
         # model = nn.DataParallel(model)
         optimizer = optim.Adam(model.parameters(), lr=LR)
-        criterion = nn.CrossEntropyLoss()
+
+        # weight = torch.tensor([1.0, 1.0, 0.5], device=DEVICE)
+        # criterion = nn.CrossEntropyLoss(weight=weight)
+
+        bce_loss   = nn.BCEWithLogitsLoss()                   # binary head
+        dir_loss   = nn.CrossEntropyLoss()
+        criterion = (bce_loss, dir_loss)
 
         best_acc = train_on_dataset(
             env, model, optimizer, criterion, BATCH_SIZE, EPOCHS, writer, model_file, sample_file=sample_file
