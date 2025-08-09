@@ -26,8 +26,6 @@ from Environment import Environment
 from Model import QNetwork
 from utils import Logger
 
-device = torch.device('cuda:5' if torch.cuda.is_available() else 'cpu')
-
 class PairDataset(Dataset):
     def __init__(self, data_txt, env, undersample=True):
         self.env   = env
@@ -96,69 +94,232 @@ class PairDataset(Dataset):
         return len(self.pairs)
 
     def __getitem__(self, idx):
-        # t0 = time.time()
+        t0 = time.perf_counter()
+        t_prev = t0
         line_idx, a, b, label = self.pairs[idx]
+        t1 = time.perf_counter()
+        # print(f"__getitem__ load_pair: {t1 - t_prev:.6f}s")
+        t_prev = t1
         starts, goals, priorities = self.raw_data[line_idx]
+        t2 = time.perf_counter()
+        # print(f"__getitem__ load_raw_data: {t2 - t_prev:.6f}s")
+        t_prev = t2
         self.env.starts = starts
+        t3 = time.perf_counter()
+        # print(f"__getitem__ set_starts: {t3 - t_prev:.6f}s")
+        t_prev = t3
         self.env.goals = goals
+        t4 = time.perf_counter()
+        # print(f"__getitem__ set_goals: {t4 - t_prev:.6f}s")
+        t_prev = t4
+        # No longer call get_obs here; agent pair returned for later batch get_obs
+        # print(f"__getitem__ total: {time.perf_counter() - t0:.6f}s")
+        # return only agent IDs; actual neighbor padding is deferred to custom_collate
+        return (a, b), label
+    
+        # OLD
+        # neighbor_features, neighbor_coords = self.env.get_neighbor_goal_heuristics_as_patches([a, b])
+        # t6 = time.perf_counter()
+        # # print(f"__getitem__ get_neighbor_patches: {t6 - t_prev:.6f}s")
+        # t_prev = t6
+        # # Pad neighbor lists to fixed size = num_agents-1
+        # max_nb = self.env.num_agents - 1
+        # t7 = time.perf_counter()
+        # # print(f"__getitem__ compute_max_nb: {t7 - t_prev:.6f}s")
+        # t_prev = t7
+        # # obs_fovs is shape (2, C, fov, fov)
+        # # build tensor for neighbors: (2, max_nb, 1, fov, fov)
+        # padded_feats = torch.zeros((2, max_nb, 1, self.env.fov, self.env.fov), dtype=torch.float32)
+        # padded_coords = torch.zeros((2, max_nb, 2), dtype=torch.float32)
+        # mask = torch.ones((2, max_nb), dtype=torch.bool)
+        # t8 = time.perf_counter()
+        # # print(f"__getitem__ alloc_tensors: {t8 - t_prev:.6f}s")
+        # t_prev = t8
+        # for i, feats in enumerate(neighbor_features):
+        #     n = feats.size(0)
+        #     if n > max_nb:
+        #         feats = feats[:max_nb]
+        #         coords = neighbor_coords[i][:max_nb]
+        #         n = max_nb
+        #     else:
+        #         coords = neighbor_coords[i]
+        #     if n > 0:
+        #         padded_feats[i, :n] = feats
+        #         padded_coords[i, :n] = coords
+        #         mask[i, :n] = False
+        # t9 = time.perf_counter()
+        # # print(f"__getitem__ fill_padding: {t9 - t_prev:.6f}s")
+        # t_prev = t9
+        # t_end = time.perf_counter()
+        # print(f"__getitem__ total: {t_end - t0:.6f}s")
+        # return obs_fovs, padded_feats, padded_coords, mask, label
 
-        # t2 = time.time()
-        obs_fovs = self.env.get_obs([a, b])
-        # print(f"obs_fovs: {time.time()-t2:0.4f}")
-        # t3 = time.time()
-        neighbor_features, neighbor_coords = self.env.get_neighbor_goal_heuristics_as_patches([a, b])
-        # print(f"get_neighbor_goal_heuristics_as_patches: {time.time()-t3:0.4f}")
+def custom_collate(batch, env):
+    # torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    # batch-level collate: agent IDs, labels
+    agent_pairs, labels = zip(*batch)
+    # torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    # print(f"unpack batch: {t1-t0:.6f}s")
+    B = len(agent_pairs)
+    labels_batch = torch.tensor(labels, dtype=torch.long)               # (B,)
+    # torch.cuda.synchronize()
+    t2 = time.perf_counter()
+    # print(f"tensor labels: {t2-t1:.6f}s")
+    # flatten agent IDs for one-shot neighbor extraction
+    flat_agents = [aid for pair in agent_pairs for aid in pair]         # length 2*B
+    # torch.cuda.synchronize()
+    t3 = time.perf_counter()
+    # print(f"flatten agents: {t3-t2:.6f}s")
 
-        # Pad neighbor lists to fixed size = num_agents-1
-        max_nb = self.env.num_agents - 1
-        # obs_fovs is shape (2, C, fov, fov)
-        # build tensor for neighbors: (2, max_nb, 1, fov, fov)
-        padded_feats = torch.zeros((2, max_nb, 1, self.env.fov, self.env.fov), dtype=torch.float32)
-        padded_coords = torch.zeros((2, max_nb, 2), dtype=torch.float32)
-        mask = torch.ones((2, max_nb), dtype=torch.bool)
-        for i, feats in enumerate(neighbor_features):
-            n = feats.size(0)
-            if n > max_nb:
-                feats = feats[:max_nb]
-                coords = neighbor_coords[i][:max_nb]
-                n = max_nb
-            else:
-                coords = neighbor_coords[i]
-            if n > 0:
-                padded_feats[i, :n] = feats
-                padded_coords[i, :n] = coords
-                mask[i, :n] = False
+    # batch get observations
+    obs_flat = env.get_obs(flat_agents)  # returns (2*B, C, fov, fov)
+    C = obs_flat.size(1)
+    obs_batch = obs_flat.view(B, 2, C, env.fov, env.fov)
+    # torch.cuda.synchronize()
+    t4 = time.perf_counter()
+    # print(f"get_obs batch: {t4-t3:.6f}s")
 
-        # print(f"total getitem: {time.time()-t0:.04f}")
-        return obs_fovs, padded_feats, padded_coords, mask, label
+    # get all neighbor patches & coords in one call
+    neigh_flat, coords_flat = env.get_neighbor_goal_heuristics_as_patches(flat_agents)
+    torch.cuda.synchronize()
+    t5 = time.perf_counter()
+    # print(f"get neighbors: {t5-t4:.6f}s")
+    # neigh_flat, coords_flat are lists of length 2*B
 
+    # determine padding dimensions
+    neighbor_lens = [f.size(0) for f in neigh_flat]
+    max_nb = max(neighbor_lens) if neighbor_lens else 0
+    fov = neigh_flat[0].size(-1) if neighbor_lens else env.fov
+    # torch.cuda.synchronize()
+    t6 = time.perf_counter()
+    # print(f"compute dims: {t6-t5:.6f}s")
 
-def custom_collate(batch):
-    # Unzip batch
-    # t0 = time.time()
-    obs_list, neigh_list, neigh_coords_list, mask_list, labels_list = zip(*batch)
+    # device & dtypes
+    device = neigh_flat[0].device if neighbor_lens else torch.device('cpu')
+    dtype_feat = neigh_flat[0].dtype if neighbor_lens else torch.float32
 
-    obs_batch = torch.stack(obs_list)
-    neigh_batch = torch.stack(neigh_list, dim=0)
-    neigh_coords_batch = torch.stack(neigh_coords_list, dim=0)
-    labels_batch = torch.tensor(labels_list)
-    mask_batch = torch.stack(mask_list, dim=0)
+    # preallocate padded tensors
+    padded_feats = torch.zeros((2*B, max_nb, 1, fov, fov),
+                               device=device, dtype=dtype_feat)
+    padded_coords = torch.zeros((2*B, max_nb, 2),
+                                device=device, dtype=torch.float32)
+    mask_flat = torch.ones((2*B, max_nb), dtype=torch.bool, device=device)
+    # torch.cuda.synchronize()
+    t7 = time.perf_counter()
+    # print(f"alloc pad: {t7-t6:.6f}s")
 
-    # print(f"custom_collate: {time.time()-t0:.04f}")
-    return obs_batch, neigh_batch, neigh_coords_batch, labels_batch, mask_batch
+    # fill in
+    # 1) pad them in one go, with timing
+    # torch.cuda.synchronize()
+    t_pf = time.perf_counter()
+    padded_feats = pad_sequence(neigh_flat, batch_first=True, padding_value=0.0)
+    # torch.cuda.synchronize()
+    t_pf_end = time.perf_counter()
+    # print(f"pad_sequence feats: {t_pf_end - t_pf:.6f}s")
+
+    # torch.cuda.synchronize()
+    t_pc = time.perf_counter()
+    padded_coords = pad_sequence(coords_flat, batch_first=True, padding_value=0.0)
+    # torch.cuda.synchronize()
+    t_pc_end = time.perf_counter()
+    # print(f"pad_sequence coords: {t_pc_end - t_pc:.6f}s")
+
+    # torch.cuda.synchronize()
+    t_rs = time.perf_counter()
+    row_sum = padded_feats.abs().sum(dim=(2,3,4))
+    # torch.cuda.synchronize()
+    t_rs_end = time.perf_counter()
+    # print(f"row_sum: {t_rs_end - t_rs:.6f}s")
+
+    # torch.cuda.synchronize()
+    t_mf = time.perf_counter()
+    mask_flat = row_sum == 0
+    # torch.cuda.synchronize()
+    t_mf_end = time.perf_counter()
+    # print(f"mask_flat: {t_mf_end - t_mf:.6f}s")
+
+    # torch.cuda.synchronize()
+    t_nb = time.perf_counter()
+    neigh_batch  = padded_feats.view(B, 2, max_nb, 1, fov, fov)
+    # torch.cuda.synchronize()
+    t_nb_end = time.perf_counter()
+    # print(f"reshape neigh_batch: {t_nb_end - t_nb:.6f}s")
+
+    # torch.cuda.synchronize()
+    t_cb = time.perf_counter()
+    coords_batch = padded_coords.view(B, 2, max_nb, 2)
+    # torch.cuda.synchronize()
+    t_cb_end = time.perf_counter()
+    # print(f"reshape coords_batch: {t_cb_end - t_cb:.6f}s")
+
+    # torch.cuda.synchronize()
+    t_mb = time.perf_counter()
+    mask_batch   = mask_flat.view(B, 2, max_nb)
+    # torch.cuda.synchronize()
+    t_mb_end = time.perf_counter()
+    # print(f"reshape mask_batch: {t_mb_end - t_mb:.6f}s")
+
+    # OLD
+    # for i, f in enumerate(neigh_flat):
+    #     n = f.size(0)
+    #     if n > 0:
+    #         padded_feats[i, :n] = f
+    #         padded_coords[i, :n] = coords_flat[i]
+    #         mask_flat[i, :n] = False
+    # torch.cuda.synchronize()
+    t8 = time.perf_counter()
+    # print(f"fill pad: {t8-t7:.6f}s")
+
+    # reshape back to (B,2,...)
+    neigh_batch = padded_feats.view(B, 2, max_nb, 1, fov, fov)
+    coords_batch = padded_coords.view(B, 2, max_nb, 2)
+    mask_batch   = mask_flat.view(B, 2, max_nb)
+    # torch.cuda.synchronize()
+    t9 = time.perf_counter()
+    # print(f"reshape: {t9-t8:.6f}s")
+
+    # print(f"custom_collate total: {t9-t0:.6f}s")
+    return obs_batch, neigh_batch, coords_batch, labels_batch, mask_batch
+
+# def custom_collate(batch):
+#     t0 = time.time()
+#     t1 = time.time()
+#     obs_list, neigh_list, neigh_coords_list, mask_list, labels_list = zip(*batch)
+#     # print(f"custom_collate unzip: {time.time()-t0:.6f}s")
+#     t2 = time.time()
+#     obs_batch = torch.stack(obs_list)
+#     # print(f"custom_collate stack obs: {time.time()-t2:.6f}s")
+#     t3 = time.time()
+#     neigh_batch = torch.stack(neigh_list, dim=0)
+#     # print(f"custom_collate stack neigh: {time.time()-t3:.6f}s")
+#     t4 = time.time()
+#     neigh_coords_batch = torch.stack(neigh_coords_list, dim=0)
+#     # print(f"custom_collate stack neigh_coords: {time.time()-t4:.6f}s")
+#     t5 = time.time()
+#     labels_batch = torch.tensor(labels_list)
+#     # print(f"custom_collate tensor labels: {time.time()-t5:.6f}s")
+#     t6 = time.time()
+#     mask_batch = torch.stack(mask_list, dim=0)
+#     # print(f"custom_collate stack mask: {time.time()-t6:.6f}s")
+#     t7 = time.time()
+#     print(f"custom_collate total: {time.time()-t0:.6f}s")
+#     return obs_batch, neigh_batch, neigh_coords_batch, labels_batch, mask_batch
 
 # --- Training Loop ---
-def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, sample_file=None):
+def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, device, sample_file=None):
     bce_loss, dir_loss = criterion
 
     data = PairDataset(sample_file+'data.txt', env)
     balanced_loader = DataLoader(
         data,
         batch_size=BATCH_SIZE,
-        collate_fn=custom_collate,
+        # collate_fn=custom_collate,
+        collate_fn=lambda batch, env=env: custom_collate(batch, env),
         shuffle=True,
-        # num_workers=8,
-        pin_memory=True,
+        # num_workers=8,     
+        # pin_memory=True,
         # persistent_workers=True
     )
     print(f"Number of batches: {len(balanced_loader)}")
@@ -167,9 +328,10 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
     test_loader = DataLoader(
         test_data,
         batch_size=BATCH_SIZE,
-        collate_fn=custom_collate,
+        # collate_fn=custom_collate,
+        collate_fn=lambda batch, env=env: custom_collate(batch, env),
         shuffle=False,
-        pin_memory=True,
+        # pin_memory=True,
     )
 
     model.train()
@@ -180,8 +342,9 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         # accumulate correct counts on GPU to avoid sync per-batch
         total_correct_tensor = torch.tensor(0, device=device)
         total_pred = 0
-        # Use tensor lists for efficient batch aggregation
-        all_pred_tensors = []
+        # Prepare lists to aggregate logits and labels for the whole epoch
+        all_bin_logits = []
+        all_dir_logits = []
         all_label_tensors = []
 
         for batch_n, batch in tqdm(enumerate(balanced_loader)):
@@ -229,30 +392,13 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             loss.backward()
             optimizer.step()
 
-            # t3 = time.perf_counter()
-            # loss = criterion(batch_q_vals, labels_batch)
-            # optimizer.zero_grad()
-            # loss.backward()
-            # optimizer.step()
-            # print(f"backward: {time.perf_counter()-t3:.04f}")
-
-            # After you compute bin_logits (shape [B]) and dir_logits (shape [B,2]):
-            # 1) Binary prediction: 1 if we think it’s priority (i.e. class 0 or 1), 0 if “no priority” (class 2)
-            bin_pred = (torch.sigmoid(bin_logits) > 0.5).long()    # [B], values in {0,1}
-            # 2) Direction prediction among the priority examples
-            dir_pred = torch.argmax(dir_logits, dim=1)            # [B], values in {0,1}
-            # 3) Fuse into a single 3-way prediction:
-            #    wherever bin_pred==0 → class 2, else → dir_pred (0 or 1)
-            default_no_prio = torch.full_like(bin_pred, 2)        # [B] all-2
-            pred = torch.where(bin_pred == 1, dir_pred, default_no_prio)
-            # now `pred` is shape [B], values in {0,1,2}
-            # 4) Compare to the true labels_batch
-            correct_tensor = (pred == labels_batch).sum()
-            batch_n       = labels_batch.size(0)
-            total_correct_tensor += correct_tensor
-            total_pred           += batch_n
-            all_pred_tensors.append(pred)
-            all_label_tensors.append(labels_batch)
+            # Accumulate loss for reporting
+            batch_n = labels_batch.size(0)
+            total_loss += loss * batch_n
+            # Instead of predictions, store logits/labels for later epoch aggregation
+            all_bin_logits.append(bin_logits.detach().cpu())
+            all_dir_logits.append(dir_logits.detach().cpu())
+            all_label_tensors.append(labels_batch.cpu())
 
             # # torch.cuda.synchronize()
             # # _t0 = time.perf_counter()
@@ -288,19 +434,24 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
 
             # print(f"total forward: {time.perf_counter()-t0:.04f}")
 
-        # finalize correct count once, causing a single sync
-        total_correct = total_correct_tensor.item()
-        total_loss = total_loss.item()
-        # Concatenate and move to CPU only once
-        all_preds = torch.cat(all_pred_tensors).cpu().tolist()
-        all_labels = torch.cat(all_label_tensors).cpu().tolist()
-        accuracy = total_correct / total_pred if total_pred > 0 else 0.0
-        macro_f1 = f1_score(all_labels, all_preds, average='macro')
-        all_preds_np = np.array(all_preds)
-        all_labels_np = np.array(all_labels)
+        # After all batches, compute predictions and accuracy for the epoch
+        bin_logits_cat = torch.cat(all_bin_logits, dim=0)
+        dir_logits_cat = torch.cat(all_dir_logits, dim=0)
+        labels_cat     = torch.cat(all_label_tensors, dim=0)
+        # Move logits to device for sigmoid/argmax, but keep labels on CPU for metrics
+        bin_pred = (torch.sigmoid(bin_logits_cat.to(device)) > 0.5).long()
+        dir_pred = torch.argmax(dir_logits_cat.to(device), dim=1)
+        default_no_prio = torch.full_like(bin_pred, 2)
+        pred_cat = torch.where(bin_pred == 1, dir_pred, default_no_prio)
+        total_correct = (pred_cat.cpu() == labels_cat).sum().item()
+        total_pred    = labels_cat.size(0)
+        accuracy      = total_correct / total_pred if total_pred > 0 else 0.0
+        all_preds_np = pred_cat.cpu().numpy()
+        all_labels_np = labels_cat.cpu().numpy()
+        macro_f1 = f1_score(all_labels_np, all_preds_np, average='macro')
         num_classes = len(set(all_labels_np))
-        print(f"Epoch {epoch+1} | Avg Loss: {total_loss/total_pred:.4f} | Accuracy: {accuracy:.4f} | F1: {macro_f1:.4f}")
-        writer.add_scalar('Loss/train', total_loss / total_pred, epoch)
+        print(f"Epoch {epoch+1} | Avg Loss: {total_loss.item()/total_pred:.4f} | Accuracy: {accuracy:.4f} | F1: {macro_f1:.4f}")
+        writer.add_scalar('Loss/train', total_loss.item() / total_pred, epoch)
         writer.add_scalar('Accuracy/train', accuracy, epoch)
         print(f"Train accuracy per class: ", end='')
         per_class_acc = []
@@ -315,7 +466,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         print()
         for cls, acc in enumerate(per_class_acc):
             writer.add_scalar(f'Accuracy/train_class_{cls}', acc, epoch)
-        test_loss, test_acc, per_class_acc = evaluate(test_loader, model, BATCH_SIZE, epoch, criterion, writer)
+        test_loss, test_acc, per_class_acc = evaluate(test_loader, model, BATCH_SIZE, epoch, criterion, writer, device)
         print(f"Test Loss: {test_loss:.4f} | Test Accuracy: {test_acc:.4f}")
         writer.add_scalar('Loss/test', test_loss, epoch)
         writer.add_scalar('Accuracy/test', test_acc, epoch)
@@ -331,7 +482,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
     return best_acc
 
 # --- Evaluation ---
-def evaluate(test_loader, model, batch_size, epoch, criterion, writer):
+def evaluate(test_loader, model, batch_size, epoch, criterion, writer, device):
     model.eval()
     bce_loss, dir_loss = criterion
 
@@ -437,28 +588,29 @@ def main():
         FOV = env_config["FOV"]
         NUM_AGENTS = env_config["NUM_AGENTS"]
 
-        env = Environment(
-            env_config,
-            logger=Logger(),  # Dummy logger
-            grid_map_file=config["paths"]["map_file"],
-            heuristic_map_file=config["paths"]["heur_file"]
-        )
-
         train_config = config["training"]
-        DEVICE = train_config["DEVICE"]
+        device = train_config["DEVICE"]
         BATCH_SIZE = train_config["BATCH_SIZE"]
         LR = float(train_config["LR"])
         label_idx = train_config["N_ACTIONS"]
         EPOCHS = train_config["EPOCHS"]
 
+        env = Environment(
+            env_config,
+            logger=Logger(),  # Dummy logger
+            grid_map_file=config["paths"]["map_file"],
+            heuristic_map_file=config["paths"]["heur_file"],
+            device=device
+        )
+
         sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{NUM_AGENTS}/w{WINDOW_SIZE}/')
 
         USE_NEIGHCOORDS = True
         model_file = f"sup_pbs_{NUM_AGENTS}_w{WINDOW_SIZE}_binary.pth"
-        writer = SummaryWriter(log_dir=f"runs/binary/w{WINDOW_SIZE}/{NUM_AGENTS}")
+        writer = SummaryWriter(log_dir=f"runs/binary_w_residual/w{WINDOW_SIZE}/{NUM_AGENTS}")
 
         # --- Model, Optimizer, Loss ---
-        model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(DEVICE)
+        model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS).to(device)
         # model = nn.DataParallel(model, device_ids=[1,2,3,4,5,6,7], output_device=1)
         # model = nn.DataParallel(model)
         optimizer = optim.Adam(model.parameters(), lr=LR)
@@ -471,7 +623,7 @@ def main():
         criterion = (bce_loss, dir_loss)
 
         best_acc = train_on_dataset(
-            env, model, optimizer, criterion, BATCH_SIZE, EPOCHS, writer, model_file, sample_file=sample_file
+            env, model, optimizer, criterion, BATCH_SIZE, EPOCHS, writer, model_file, device, sample_file=sample_file
         )
 
         writer.close()

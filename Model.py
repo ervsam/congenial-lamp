@@ -96,11 +96,21 @@ class QNetwork(nn.Module):
             nn.Linear(self.hid_dim, self.num_actions),
         )
 
-        self.bin_fc       = nn.Linear(self.hid_dim * 2, 1)    # binary logit
-        self.dir_fc       = nn.Linear(self.hid_dim * 2, 2)    # class-0 vs class-1
+        self.bin_fc       = nn.Sequential(
+            nn.Linear(self.hid_dim * 2, self.hid_dim),
+            nn.ReLU(),
+            nn.Linear(self.hid_dim, self.hid_dim),
+            nn.ReLU(),
+            nn.Linear(self.hid_dim, 1),
+        )
+        self.dir_fc       = nn.Sequential(
+            nn.Linear(self.hid_dim * 2, self.hid_dim),
+            nn.LeakyReLU(),
+            nn.Linear(self.hid_dim, 2),
+        )
 
         # New: Neighbor attention module (can use MultiheadAttention)
-        self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=2, batch_first=True)
+        self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=4, batch_first=True)
 
     def forward(self,
                 batch_obs,
@@ -157,10 +167,9 @@ class QNetwork(nn.Module):
                 neighbor_embeds = self.neigh_out(neighcoords_embeds)
 
             neighbor_embeds = neighbor_embeds.view(total_agents, max_neighbors, hid_dim)
-            all_agent_embeds_tensor = batch_enc  # (total_agents, hid_dim)
 
             # ----------- Batched attention for all agents -------------
-            agent_embed_q = all_agent_embeds_tensor.unsqueeze(1)          # (total_agents, 1, H)
+            agent_embed_q = batch_enc.unsqueeze(1)          # (total_agents, 1, H)
             assert agent_embed_q.shape == (batch_size*2, 1, hid_dim), f"Expected {(batch_size*2, 1, hid_dim)}, got {agent_embed_q.shape}"
             neighbor_embeds_kv = neighbor_embeds                          # (total_agents, max_neighbors, H)
             assert neighbor_embeds_kv.shape == (batch_size*2, max_neighbors, hid_dim), f"Expected {(batch_size*2, max_neighbors, hid_dim)}, got {neighbor_embeds_kv.shape}"
@@ -171,7 +180,7 @@ class QNetwork(nn.Module):
                 neighbor_embeds_kv,
                 key_padding_mask=mask
             )  # (total_agents, 1, H)
-            fused_embeds = attn_out.squeeze(1)  # (total_agents, H)
+            fused_embeds = agent_embed_q.squeeze(1) + attn_out.squeeze(1)  # (total_agents, H)
             assert fused_embeds.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {fused_embeds.shape}"
 
             batch_enc = fused_embeds
