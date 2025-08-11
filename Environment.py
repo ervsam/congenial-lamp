@@ -148,19 +148,6 @@ class Environment:
         self.DHC_heur_arr = np.array(list(_DHC_heur_map.values()), dtype=np.float32)
         self.DHC_heur_arr_cuda = torch.from_numpy(self.DHC_heur_arr).to(self.device, non_blocking=True)
 
-        # dhc_wins = []
-        # for goal in tqdm(_goal_list):
-        #     # shape (4,H,W)
-        #     arr = _DHC_heur_map[goal].astype(np.float32)
-        #     t = torch.from_numpy(arr)  # (4,H,W)
-        #     t = F.pad(t, (pad, pad, pad, pad))  # (4,H',W')
-        #     # unfold for each direction: (4,H',W') -> (4,H,W,fov,fov)
-        #     t_unf = t.unfold(1, self.fov, 1).unfold(2, self.fov, 1)  # (4,H,W,fov,fov)
-        #     dhc_wins.append(t_unf)
-        # # Keep full DHC windows on CPU to avoid GPU OOM; move slices to GPU in get_obs
-        # self._dhc_windows = torch.stack(dhc_wins, dim=0).cpu()
-
-
     def _get_start_locs(self):
         # choose self.num_agents random starting positions
         idxs = np.random.choice(len(self.start_loc_options), self.num_agents, replace=False)
@@ -204,11 +191,6 @@ class Environment:
                         heuristic_map[(y, x)][y2, x2] = len(space_time_astar(self.grid_map, (y, x), [(y2, x2)], set(), set())) - 1
         return heuristic_map
 
-    # def _get_DHC_heur(self):
-    #     return [
-    #         np.stack([self._DHC_heur_map[goal] for goal in agent_goals], axis=0) for agent_goals in self.goals
-    #     ]
-
     def _get_fov(self, grid_map, x, y, fov):
         padded_grid = np.pad(grid_map, pad_width=fov//2, mode='constant', constant_values=0)
         return padded_grid[x:x+fov, y:y+fov]
@@ -225,13 +207,25 @@ class Environment:
         base = self.padded_grid_map_cuda.unsqueeze(0).unsqueeze(0)  # (1,1,H',W')
         occ  = torch.zeros_like(self.padded_grid_map_cuda, device=device)
         coords_all = torch.tensor(self.starts, device=device)
-        occ[coords_all[:,0], coords_all[:,1]] = 1
+        coords_all_pad = coords_all + pad
+        occ[coords_all_pad[:,0], coords_all_pad[:,1]] = 1
         occ = occ.unsqueeze(0).unsqueeze(0)  # (1,1,H',W')
         all_feats = torch.cat([base, occ], dim=1)     # (1,2,H',W')
         patches = F.unfold(all_feats, kernel_size=fov).view(1, 2, fov*fov, -1)  # (1,2,fov*fov,#windows)
-        # Select windows at our positions
-        idxs = ys * (self.grid_map.shape[1]) + xs
-        obs0 = patches[0,:, :, idxs].view(2*N, fov, fov)  # (2N,fov,fov)
+
+        # compute the correct linear indices for windows:
+        Hp, Wp = self.padded_grid_map_cuda.shape      # H' , W'
+        # number of valid top-left positions along width after unfold
+        win_w = Wp - fov + 1
+        # (with pad=fov//2, win_w == self.grid_map.shape[1], but compute it robustly)
+        idxs = ys * win_w + xs                        # (N,) long
+
+        # reshape to (1, 2, fov*fov, L) then gather
+        patches = patches.view(1, 2, fov*fov, -1)     # (1,2,fov*fov,L)
+        obs0    = patches[0, :, :, idxs]              # (2, fov*fov, N)
+        obs0    = obs0.permute(2, 0, 1).contiguous()  # (N, 2, fov*fov)
+        obs0    = obs0.view(N, 2, fov, fov)           # (N, 2, fov, fov)
+
         # 2) heuristics: unfold and gather
         heur_windows = self._padded_heur_cuda.unsqueeze(1)  # (G,1,H',W')
         heur_patches = heur_windows.unfold(2,fov,1).unfold(3,fov,1)  # (G,1,H,W,fov,fov)
@@ -258,68 +252,6 @@ class Environment:
         # 5) stack all layers: obstacle, occ, norm-heur, dhc (4), coord → (N,8,fov,fov)
         obs_out = torch.cat([obs0.view(N,2,fov,fov), hpatch.unsqueeze(1), dhc_patch, coord], dim=1)
         return obs_out
-
-        # OLD
-        # import time
-        # t0 = time.perf_counter()
-        # # Build entire obs_fovs on CPU, then move once to GPU
-        # N = len(agents)
-        # fov = self.fov
-        # pad = fov // 2
-        # layers = 8
-
-        # # 1) Gather agent positions and goals
-        # starts = [self.starts[a] for a in agents]
-        # goals0 = [self.goals[a][0] for a in agents]
-
-        # # 2) Allocate a CPU tensor for obs_fovs
-        # obs_fovs_cpu = torch.empty((N, layers, fov, fov), dtype=torch.float32)
-
-        # # 4) Agent occupancy layer (CPU) using padded_grid_map shape
-        # # build padded agent occupancy tensor once
-        # padded_agent = torch.zeros_like(self.padded_grid_map)
-        # coords = torch.tensor(self.starts, dtype=torch.long)
-        # coords_pad = coords + pad
-        # padded_agent[coords_pad[:, 0], coords_pad[:, 1]] = 1.0
-
-        # # 3) Static obstacle map (CPU)
-        # for i, ((y0, x0), goal) in enumerate(zip(starts, goals0)):
-        #     obs_fovs_cpu[i, 0] = self.padded_grid_map[y0:y0+fov, x0:x0+fov]
-        #     obs_fovs_cpu[i, 1] = padded_agent[y0:y0+fov, x0:x0+fov]
-
-        #     # extract the (H+2pad, W+2pad) padded tensor for this goal
-        #     t_pad = self._padded_heuristic_map[goal]  # torch.Tensor
-        #     # slice out the fov x fov window
-        #     patch = t_pad[y0:y0+fov, x0:x0+fov]
-        #     # create mask for finite entries
-        #     mask = patch != float('inf')
-        #     # compute max over valid entries, default to 1.0 if none
-        #     if mask.any():
-        #         maxv = patch[mask].max()
-        #     else:
-        #         maxv = torch.tensor(1.0, dtype=patch.dtype)
-        #     # normalize valid cells and set invalid cells to 1.0
-        #     norm = torch.where(mask, patch / maxv, torch.tensor(1.0, dtype=patch.dtype))
-        #     obs_fovs_cpu[i, 2] = norm
-
-        #     g_idx = self._goal_index[ goals0[i] ]
-        #     # all4 = self._dhc_windows[ g_idx, :, y0, x0 ]   # → shape (4, fov, fov)
-
-        #     arr = self.DHC_heur_arr[g_idx]
-        #     t = torch.from_numpy(arr)  # (4,H,W)
-        #     t = F.pad(t, (pad, pad, pad, pad))  # (4,H',W')
-        #     all4 = t[:, y0:y0+fov, x0:x0+fov]
-            
-        #     obs_fovs_cpu[i, 3:7] = all4
-
-        # # 7) Coordinate channel (CPU)
-        # for i, (y0, x0) in enumerate(starts):
-        #     coord_map = torch.zeros((fov, fov), dtype=torch.float32)
-        #     coord_map[0, 0] = x0 / self.size_x
-        #     coord_map[0, 1] = y0 / self.size_y
-        #     obs_fovs_cpu[i, 7] = coord_map
-
-        # return obs_fovs_cpu
 
     def get_neighbor_goal_heuristics_as_patches(self, agents):
         """

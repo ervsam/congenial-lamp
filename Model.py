@@ -53,7 +53,7 @@ class Encoder(nn.Module):
 
 # %% Q-Network (agent utility network)
 class QNetwork(nn.Module):
-    def __init__(self, fov, USE_NEIGHCOORDS):
+    def __init__(self, fov, USE_NEIGHCOORDS, head_mode: str = "stacked"):
         super(QNetwork, self).__init__()
 
         self.hid_dim = LATENT_DIM
@@ -61,6 +61,12 @@ class QNetwork(nn.Module):
         self.USE_NEIGH_COORD = USE_NEIGHCOORDS
         self.num_actions = 3
         self.encoder = Encoder(fov, hid_dim=self.hid_dim)
+
+        # Head selection: "stacked" (binary + direction) or "threeway" (single 3-class head)
+        allowed_modes = {"stacked", "threeway"}
+        if head_mode not in allowed_modes:
+            raise ValueError(f"head_mode must be one of {allowed_modes}, got {head_mode}")
+        self.head_mode = head_mode
 
         self.NeighborHeurEncoder = nn.Sequential(
             nn.Conv2d(1, 8, 3, padding=1),
@@ -109,7 +115,6 @@ class QNetwork(nn.Module):
             nn.Linear(self.hid_dim, 2),
         )
 
-        # New: Neighbor attention module (can use MultiheadAttention)
         self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=4, batch_first=True)
 
     def forward(self,
@@ -117,7 +122,7 @@ class QNetwork(nn.Module):
                 batch_neighbor_patches = None,  # Tensor(batch_size, 2, max_neighbor, 1, F, F)
                 batch_neigh_coords = None, # Tensor(batch_size, 2, max_neighbor, 2)
                 mask = None
-            ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+            ):
 
         #### ---------------------------------------------------------------- ##
         #### 0.  Episode-level bookkeeping
@@ -194,12 +199,13 @@ class QNetwork(nn.Module):
         # pair_enc = torch.cat([h_a, h_b], dim=-1)     # (n_pairs, 2H)
         pair_enc_per_ep = batch_enc.view(batch_size, 2 * hid_dim)
 
-        # pair_q   = self.qnet(pair_enc)               # (n_pairs, 2)
-        # qvals_per_ep = self.qnet(pair_enc_per_ep)
-
-        bin_logits = self.bin_fc(pair_enc_per_ep).squeeze(-1)        # (B,)
-        dir_logits = self.dir_fc(pair_enc_per_ep)                  # (B,2)
-
-        # assert len(qvals_per_ep) == batch_size, f"Expected {batch_size}, got {len(qvals_per_ep)}"
-        # assert qvals_per_ep[0].shape[1] == self.num_actions, f"Expected {self.num_actions}, got {qvals_per_ep[0].shape[1]}"
-        return pair_enc_per_ep, bin_logits, dir_logits
+        # Choose head based on configuration
+        if self.head_mode == "stacked":
+            # Binary + direction heads
+            bin_logits = self.bin_fc(pair_enc_per_ep).squeeze(-1)   # (B,)
+            dir_logits = self.dir_fc(pair_enc_per_ep)                # (B,2)
+            return pair_enc_per_ep, bin_logits, dir_logits
+        else:  # "threeway"
+            # Single 3-class head
+            class_logits = self.qnet(pair_enc_per_ep)                # (B,3)
+            return pair_enc_per_ep, class_logits

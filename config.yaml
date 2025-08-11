@@ -8,10 +8,11 @@ warehouse_2:
   
   training:
     N_ACTIONS: 3
-    DEVICE: "cuda:5"
+    DEVICE: "cuda:6"
     BATCH_SIZE: 64
-    LR: 5e-4
+    LR: 1e-4
     EPOCHS: 100
+    MODE: stacked
 
   paths:
     results: "warehouse_2_supervise/"
