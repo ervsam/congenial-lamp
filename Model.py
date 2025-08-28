@@ -26,11 +26,11 @@ class ResBlock(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, fov, hid_dim: int = LATENT_DIM):
         super().__init__()
-        self.layers = 7          # image channels
         self.fov = fov
 
+        # Use LazyConv2d to accept variable # of input channels at first forward
         self.conv = nn.Sequential(
-            nn.Conv2d(self.layers, 32, 3, padding=1),
+            nn.LazyConv2d(32, 3, padding=1),
             nn.LeakyReLU(),
             ResBlock(32),                             # <- keep two res-blocks
             ResBlock(32),
@@ -138,14 +138,42 @@ class QNetwork(nn.Module):
         #### ---------------------------------------------------------------- ##
         #### 1.  Flatten → encode every agent once
         #### ---------------------------------------------------------------- ##
-        # batch_obs: batch_size, 2, C, F, F
-        batch_obs = batch_obs.view(batch_size*2, 8, self.fov, self.fov)
+        # NOTE: We support variable channel layouts. The coordinate channel is detected dynamically
+        # so that additional pair features (e.g., neighbor mask, (dx,dy) broadcast) can be appended
+        # without changing the model definition.
+        # batch_obs: (batch_size, 2, C, F, F) -> (batch_size*2, C, F, F)
+        batch_obs = batch_obs.view(batch_size*2, -1, self.fov, self.fov)
+        C = batch_obs.shape[1]
 
-        batch_coordinates = batch_obs[:, -1, 0, 0:2]    # (ΣN_i, 2)
+        # Heuristic to locate the coordinate channel:
+        # Expect exactly two nonzeros at (0,0) and (0,1); fallback to last channel if none found.
+        def find_coord_channel(t):
+            # t: (B2, C, F, F)
+            # Check pattern on the first sample; assume consistent channel ordering across batch
+            first = t[0]  # (C, F, F)
+            nz_counts = (first != 0).view(C, -1).sum(dim=1)
+            coord_idx = None
+            for c in range(C):
+                if nz_counts[c].item() == 2:
+                    if bool(first[c, 0, 0] != 0) and bool(first[c, 0, 1] != 0):
+                        coord_idx = c
+                        break
+            if coord_idx is None:
+                coord_idx = C - 1
+            return coord_idx
+
+        coord_ch = find_coord_channel(batch_obs)
+        batch_coordinates = batch_obs[:, coord_ch, 0, 0:2]
         assert batch_coordinates.shape == (batch_size*2, 2), f"Expected {(batch_size*2, 2)}, got {batch_coordinates.shape}"
 
-        batch_obs = batch_obs[:, :-1]    # (ΣN_i, C-1, F, F)
-        assert batch_obs.shape == (batch_size*2, 7, self.fov, self.fov), f"Expected {(batch_size*2, 7, self.fov, self.fov)}, got {batch_obs.shape}"
+        # Remove coord channel from the image stack
+        if coord_ch == 0:
+            img = batch_obs[:, 1:]
+        elif coord_ch == C - 1:
+            img = batch_obs[:, :-1]
+        else:
+            img = torch.cat([batch_obs[:, :coord_ch], batch_obs[:, coord_ch+1:]], dim=1)
+        batch_obs = img  # (B2, C-1, F, F) with variable channels
 
         batch_enc   = self.encoder(batch_obs, batch_coordinates)     # (batch_size*2, h)
         assert batch_enc.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {batch_enc.shape}"

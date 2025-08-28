@@ -135,13 +135,6 @@ class Environment:
 
         # (a) Build one giant CPU tensor of shape (G, 1, H+2pad, W+2pad) where G = number of unique goals
         _goal_list = list(self.heuristic_map.keys())
-        # maps = []
-        # for goal in _goal_list:
-        #     arr = self.heuristic_map[goal].astype(np.float32)
-        #     maps.append(np.pad(arr, pad_width=pad, mode='constant', constant_values=np.inf))
-        # # Stack once and move to device
-        # self._padded_maps = torch.from_numpy(np.stack(maps, axis=0)).unsqueeze(1)  # (G,1,H',W')
-        # (b) A lookup from goal→index in that tensor
         self._goal_index = {g:i for i,g in enumerate(_goal_list)}
         
         # 3. DHC windows for each goal in _goal_list, shape (G,4,H,W,fov,fov)
