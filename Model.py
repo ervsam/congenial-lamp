@@ -53,12 +53,11 @@ class Encoder(nn.Module):
 
 # %% Q-Network (agent utility network)
 class QNetwork(nn.Module):
-    def __init__(self, fov, USE_NEIGHCOORDS, head_mode: str = "stacked"):
+    def __init__(self, fov, head_mode: str = "stacked"):
         super(QNetwork, self).__init__()
 
         self.hid_dim = LATENT_DIM
         self.fov = fov
-        self.USE_NEIGH_COORD = USE_NEIGHCOORDS
         self.num_actions = 3
         self.encoder = Encoder(fov, hid_dim=self.hid_dim)
 
@@ -190,14 +189,13 @@ class QNetwork(nn.Module):
 
             neighbor_embeds = self.NeighborHeurEncoder(flat_neighbors)  # (total_agents * max_neighbors, hid_dim)
 
-            if self.USE_NEIGH_COORD:
-                pad_neigh_coord = batch_neigh_coords
+            pad_neigh_coord = batch_neigh_coords
 
-                flat_coords = pad_neigh_coord.view(-1, 2)
-                coords_embeds = self.neigh_coord_fc(flat_coords)
-                # coords_embeds: (total_agents * max_neighbors, hid_dim)
-                neighcoords_embeds = torch.cat([neighbor_embeds, coords_embeds], dim=1)
-                neighbor_embeds = self.neigh_out(neighcoords_embeds)
+            flat_coords = pad_neigh_coord.view(-1, 2)
+            coords_embeds = self.neigh_coord_fc(flat_coords)
+            # coords_embeds: (total_agents * max_neighbors, hid_dim)
+            neighcoords_embeds = torch.cat([neighbor_embeds, coords_embeds], dim=1)
+            neighbor_embeds = self.neigh_out(neighcoords_embeds)
 
             neighbor_embeds = neighbor_embeds.view(total_agents, max_neighbors, hid_dim)
 

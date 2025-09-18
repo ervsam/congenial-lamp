@@ -128,7 +128,6 @@ class PairDataset(Dataset):
         row, col = self.env.grid_map.shape
         row = row - 2
         col = col - 2
-        assert (row, col) == (33, 46)
 
         with open(data_txt) as f:
             print(f"Reading from {data_txt}...")
@@ -241,7 +240,6 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
     once over the unique agents participating in that episode's pairs, then
     assemble per-pair tensors in the ORIGINAL batch order.
     """
-    from collections import defaultdict
 
     # Unpack batch tuples: (line_idx, starts, goals, (a,b), label)
     line_idx, starts_list, goals_list, agent_pairs, labels = zip(*batch)
@@ -856,50 +854,96 @@ def main():
             device=device
         )
 
-        sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{NUM_AGENTS}/w{WINDOW_SIZE}/')
+        map_name = os.path.basename(config["paths"]["map_file"]).replace('.npy','')
+        sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{map_name}/{NUM_AGENTS}/w{WINDOW_SIZE}/')
 
-        USE_NEIGHCOORDS = True
         # ---- Build descriptive model filename from training args ----
         def sanitize(s: str) -> str:
             # make safe for filesystem: replace commas and spaces; keep dots and dashes
             return s.replace(',', '-').replace(' ', '')
 
-        tag_parts = []
-        tag_parts.append('stability' if args.use_stability else 'base')
-        if args.use_hardneg:
-            tag_parts.append(f"HN-r{int(args.hard_radius)}-f{args.hard_frac:g}")
-        if args.pair_id:
-            tag_parts.append("pairMask")
-        if args.pair_rel:
-            tag_parts.append("pairRel")
-        if MODE == 'threeway' and args.criterion == 'focal':
-            # include gamma and alpha vector
-            try:
-                alphas_str = sanitize(args.focal_alpha)
-            except Exception:
-                alphas_str = 'na'
-            tag_parts.append(f"focal-g{args.focal_gamma:g}-a{alphas_str}")
-        tag = '_'.join(tag_parts)
-        model_file = f"sup_pbs_{NUM_AGENTS}_w{WINDOW_SIZE}_{MODE}_{tag}.pth"
 
-        run_dir = f"runs/{MODE}/w{WINDOW_SIZE}/{NUM_AGENTS}"
         if args.experiment_name:
-            run_dir = os.path.join(run_dir, args.experiment_name)
+            tag = args.experiment_name
+        else:
+            tag_parts = []
+            tag_parts.append('stability' if args.use_stability else 'base')
+            if args.use_hardneg:
+                tag_parts.append(f"HN-r{int(args.hard_radius)}-f{args.hard_frac:g}")
+            if args.pair_id:
+                tag_parts.append("pairMask")
+            if args.pair_rel:
+                tag_parts.append("pairRel")
+            if MODE == 'threeway' and args.criterion == 'focal':
+                # include gamma and alpha vector
+                try:
+                    alphas_str = sanitize(args.focal_alpha)
+                except Exception:
+                    alphas_str = 'na'
+                tag_parts.append(f"focal-g{args.focal_gamma:g}-a{alphas_str}")
+            tag = '_'.join(tag_parts)
+        os.makedirs("models", exist_ok=True)
+        model_file = os.path.join("models", f"N{NUM_AGENTS}_w{WINDOW_SIZE}_{MODE}_{tag}.pth")
+
+        run_root = os.path.join("runs", map_name, MODE, f"w{WINDOW_SIZE}", f"{NUM_AGENTS}")
+        run_dir  = run_root
+        if args.experiment_name:
+            run_dir = os.path.join(run_root, args.experiment_name)
         else:
             tag = "stability" if args.use_stability else "base"
             if args.use_hardneg:
-                tag += "_HN"
+                tag += f"_HN-r{int(args.hard_radius)}-f{args.hard_frac:g}"
             if args.pair_id:
                 tag += "_pairMask"
             if args.pair_rel:
                 tag += "_pairRel"
             if train_config.get("MODE", "auto") == "threeway" and args.criterion == "focal":
-                tag += f"_focal-g{args.focal_gamma:g}"
-            run_dir = os.path.join(run_dir, tag)
+                # include both gamma and alpha in run name
+                alphas_str = sanitize(args.focal_alpha) if isinstance(args.focal_alpha, str) else "na"
+                tag += f"_focal-g{args.focal_gamma:g}-a{alphas_str}"
+            run_dir = os.path.join(run_root, tag)
         writer = SummaryWriter(log_dir=run_dir)
 
+        # --- Persist run configuration for traceability ---
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+            run_cfg = {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "mode": MODE,
+                "env": {
+                    "NUM_AGENTS": NUM_AGENTS,
+                    "WINDOW_SIZE": WINDOW_SIZE,
+                    "FOV": FOV,
+                },
+                "train": {
+                    "DEVICE": device,
+                    "BATCH_SIZE": BATCH_SIZE,
+                    "LR": LR,
+                    "EPOCHS": EPOCHS,
+                    "use_stability": bool(args.use_stability),
+                },
+                "options": {
+                    "use_hardneg": bool(args.use_hardneg),
+                    "hard_radius": int(args.hard_radius),
+                    "hard_frac": float(args.hard_frac),
+                    "pair_id": bool(args.pair_id),
+                    "pair_rel": bool(args.pair_rel),
+                    "criterion": args.criterion,
+                    "focal_gamma": float(args.focal_gamma) if args.criterion == "focal" else None,
+                    "focal_alpha": str(args.focal_alpha) if args.criterion == "focal" else None,
+                },
+                "artifacts": {
+                    "model_file": model_file,
+                    "run_dir": run_dir,
+                },
+            }
+            with open(os.path.join(run_dir, "run_config.yaml"), "w") as f:
+                yaml.safe_dump(run_cfg, f, sort_keys=False)
+        except Exception as _e:
+            print(f"[warn] failed to write run_config.yaml: {_e}")
+
         # --- Model, Optimizer, Loss ---
-        model = QNetwork(fov=FOV, USE_NEIGHCOORDS=USE_NEIGHCOORDS, head_mode=MODE).to(device)
+        model = QNetwork(fov=FOV, head_mode=MODE).to(device)
         # model = nn.DataParallel(model, device_ids=[1,2,3,4,5,6,7], output_device=1)
         # model = nn.DataParallel(model)
         if args.use_stability:

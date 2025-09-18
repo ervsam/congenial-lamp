@@ -2,21 +2,21 @@ warehouse_2:
   root: "results/"
 
   environment:
-    NUM_AGENTS: 140
+    NUM_AGENTS: 900
     WINDOW_SIZE: 20
     FOV: 81 # WINDOW_SIZE * 4 + 1
   
   training:
     N_ACTIONS: 3
-    DEVICE: "cuda:5"
+    DEVICE: "cuda:4"
     BATCH_SIZE: 64
     LR: 1e-4
     EPOCHS: 100
     MODE: threeway
 
   paths:
-    results: "warehouse_2_supervise/"
-    map_file: "maps/warehouse_2/grid_map.npy"
-    heur_file: "maps/warehouse_2/heuristic.npy"
-    goals_locs: "maps/warehouse_2/goal_options.npy"
-    start_locs: "maps/warehouse_2/start_options.npy"
+    # results: "warehouse_2_supervise/"
+    map_file: "maps/kiva_large.npy"
+    heur_file: "maps/kiva_large_heur.npy"
+    # goals_locs: "maps/warehouse_2/goal_options.npy"
+    # start_locs: "maps/warehouse_2/start_options.npy"

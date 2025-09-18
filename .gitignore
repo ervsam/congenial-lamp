@@ -3,7 +3,7 @@
 /q_net_model/
 /results/
 /runs
-
+/archive
 
 *.txt
 *.png

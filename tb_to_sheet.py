@@ -36,6 +36,14 @@ def get_max_value(series):
     best = max(series, key=lambda t: t[1])
     return best[1], best[0]
 
+# Helper: get value at a specific step (epoch)
+def get_value_at_step(series, step):
+    """series: list of (step,val,time). Return value at exact step if present; else ''."""
+    if step == '' or series is None:
+        return ''
+    by_step = {s: v for (s, v, _) in series}
+    return by_step.get(step, '')
+
 def parse_experiment_fields(run_path: Path):
     """
     Robustly extract (mode, window, num_agents, experiment) from run path.
@@ -92,11 +100,16 @@ def collect_one_run(run_dir: Path):
         by_step = {s: v for (s, v, _) in test_loss_series}
         best_test_loss_at_best = by_step.get(best_epoch, '')
 
-    # Per-class test accuracy (you log these in evaluate)
+    # Per-class validation accuracy at the epoch where overall ValAcc is best
     test_cls = []
-    for cls in range(3):  # threeway head → 3 classes
+    for cls in range(3):
         tag = f'Accuracy/test_class_{cls}'
-        test_cls.append(get_last_value(scalars.get(tag, [])))
+        series = scalars.get(tag, [])
+        val_at_best = get_value_at_step(series, best_epoch)
+        # if missing (e.g., tag not logged exactly at that step), fall back to last
+        if val_at_best == '':
+            val_at_best = get_last_value(series)
+        test_cls.append(val_at_best)
 
     mode, win, agents, expname = parse_experiment_fields(run_dir)
     date_str = datetime.now().strftime('%Y-%m-%d')
