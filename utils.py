@@ -124,7 +124,7 @@ class Logger:
     def print(self, *args, end="\n"):
         args = [round(a, 3) if isinstance(a, (int, float)) else a for a in args]
 
-        print(*args)
+        print(*args, end=end)
 
         # Additional content can be appended using 'a' mode (append mode)
         with open(self.filename, 'a') as file:

@@ -4,6 +4,10 @@
 /results/
 /runs
 /archive
+/exp_summary
+/maps
+/models
+/move_files.py
 
 *.txt
 *.png

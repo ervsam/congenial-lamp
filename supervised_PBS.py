@@ -25,6 +25,14 @@ import argparse
 from sklearn.metrics import confusion_matrix
 import csv
 
+from Environment import Environment
+from Model import QNetwork
+from utils import Logger
+
+# --- Collate profiling toggles ---
+PROFILE_COLLATE = False
+PROFILE_EVERY   = 1
+_COLLATE_CALLS  = 0
 
 class EMA:
     """Exponential Moving Average with shape-safety for lazy params.
@@ -110,9 +118,6 @@ class FocalCE(nn.Module):
         return fl.mean()
 
 
-from Environment import Environment
-from Model import QNetwork
-from utils import Logger
 
 class PairDataset(Dataset):
     def __init__(self, data_txt, env, undersample=True, use_hardneg=False, hardneg_radius=5, hardneg_frac=0.5):
@@ -129,41 +134,120 @@ class PairDataset(Dataset):
         row = row - 2
         col = col - 2
 
+        # ---- Profiling accumulators ----
+        prof_counts = 0
+        prof_sum = {
+            'split': 0.0,
+            'ast': 0.0,
+            'idx2coord': 0.0,
+            'prio': 0.0,
+            'set_starts': 0.0,
+            'get_pairs': 0.0,
+            'label_loop': 0.0,
+            'total': 0.0,
+        }
+
         with open(data_txt) as f:
             print(f"Reading from {data_txt}...")
             for line_idx, line in tqdm(enumerate(f)):
+                t0 = time.perf_counter()
+
+                # split
+                t = time.perf_counter()
                 starts_str, goals_str, priorities_str = line.split(';')
+                prof_sum['split'] += (time.perf_counter() - t)
+
+                # parse AST
+                t = time.perf_counter()
                 starts = ast.literal_eval(starts_str)
                 goals = ast.literal_eval(goals_str)
                 priorities = ast.literal_eval(priorities_str.replace(': [', ':['))
+                prof_sum['ast'] += (time.perf_counter() - t)
+
                 # revert from idx to coord
+                t = time.perf_counter()
                 starts = [(start//col + 1, start%col + 1) for start in starts]
                 goals = [[(g//col + 1, g%col + 1) for g in goal] for goal in goals]
+                prof_sum['idx2coord'] += (time.perf_counter() - t)
 
+                # build partial priorities list
+                t = time.perf_counter()
                 partial_prio = []
                 for low, highs in priorities.items():
                     for high in highs:
                         partial_prio.append((high, low))
+                prof_sum['prio'] += (time.perf_counter() - t)
 
+                # cache raw episode
                 self.raw_data.append((starts, goals, partial_prio))
 
+                # set env.starts
+                t = time.perf_counter()
                 self.env.starts = starts
-                close_pairs = self.env.get_close_pairs()
-                for (a,b) in close_pairs:
-                    if (a,b) in partial_prio:
-                        label = 0
-                    elif (b,a) in partial_prio:
-                        label = 1
-                    else:
-                        label = 2
-                    # mark hard negatives for class 2 based on Manhattan distance in starts
-                    if label == 2:
-                        ya, xa = starts[a]
-                        yb, xb = starts[b]
-                        manh = abs(yb - ya) + abs(xb - xa)
-                        if manh <= self.hardneg_radius:
-                            self._class2_hard.append(len(self.pairs))  # index that will be used when appended
-                    self.pairs.append((line_idx, a, b, label))
+                prof_sum['set_starts'] += (time.perf_counter() - t)
+
+                # get close pairs
+                t = time.perf_counter()
+                close_pairs = self.env.get_close_pairs_fast()
+                prof_sum['get_pairs'] += (time.perf_counter() - t)
+
+                # ---- Vectorized labeling & hard-negative marking ----
+                t = time.perf_counter()
+                P0 = len(self.pairs)
+
+                if len(close_pairs) > 0:
+                    # Build label matrix L (N x N), default 2 (no prio)
+                    Nloc = len(starts)
+                    L = np.full((Nloc, Nloc), 2, dtype=np.uint8)
+                    # partial_prio stores (high, low): label 0 → (a,b) means a before b
+                    for (hi, lo) in partial_prio:
+                        if 0 <= hi < Nloc and 0 <= lo < Nloc:
+                            L[hi, lo] = 0
+                            L[lo, hi] = 1  # opposite direction
+
+                    pairs_np = np.asarray(close_pairs, dtype=np.int64)  # (P,2) with columns (a,b)
+                    a_idx = pairs_np[:, 0]
+                    b_idx = pairs_np[:, 1]
+
+                    labels_np = L[a_idx, b_idx]
+
+                    # Manhattan distance per pair (vectorized)
+                    starts_np = np.asarray(starts, dtype=np.int32)  # (N,2) as (y,x)
+                    ya = starts_np[a_idx, 0]; xa = starts_np[a_idx, 1]
+                    yb = starts_np[b_idx, 0]; xb = starts_np[b_idx, 1]
+                    manh = np.abs(yb - ya) + np.abs(xb - xa)
+
+                    # Hard-negatives: class 2 and within radius
+                    hn_mask = (labels_np == 2) & (manh <= int(self.hardneg_radius))
+                    if np.any(hn_mask):
+                        hn_positions = np.nonzero(hn_mask)[0]
+                        # Indices in self.pairs after extension will be P0 .. P0+P-1
+                        self._class2_hard.extend((P0 + hn_positions).tolist())
+
+                    # Bulk-extend pairs list
+                    self.pairs.extend([(line_idx, int(a), int(b), int(lbl))
+                                       for a, b, lbl in zip(a_idx.tolist(), b_idx.tolist(), labels_np.tolist())])
+                prof_sum['label_loop'] += (time.perf_counter() - t)
+
+                prof_sum['total'] += (time.perf_counter() - t0)
+                prof_counts += 1
+
+                # Optional: print every 50 episodes
+                if prof_counts % 100000000 == 0:
+                    avg = {k: (v/max(1,prof_counts))*1000.0 for k,v in prof_sum.items()}
+                    print((
+                        f"[pairdata prof @{prof_counts}] split={avg['split']:.2f}ms, ast={avg['ast']:.2f}ms, "
+                        f"idx2coord={avg['idx2coord']:.2f}ms, prio={avg['prio']:.2f}ms, set_starts={avg['set_starts']:.2f}ms, "
+                        f"get_pairs={avg['get_pairs']:.2f}ms, label_loop={avg['label_loop']:.2f}ms | total={avg['total']:.2f}ms/ep"
+                    ))
+
+        if prof_counts > 0:
+            avg = {k: (v/prof_counts)*1000.0 for k,v in prof_sum.items()}
+            print((
+                f"[pairdata prof FINAL N={prof_counts}] split={avg['split']:.2f}ms, ast={avg['ast']:.2f}ms, "
+                f"idx2coord={avg['idx2coord']:.2f}ms, prio={avg['prio']:.2f}ms, set_starts={avg['set_starts']:.2f}ms, "
+                f"get_pairs={avg['get_pairs']:.2f}ms, label_loop={avg['label_loop']:.2f}ms | total={avg['total']:.2f}ms/ep"
+            ))
 
         # Print class counts before undersampling
         pre_counts = Counter([lbl for (_, _, _, lbl) in self.pairs])
@@ -234,16 +318,38 @@ class PairDataset(Dataset):
         # print(f"__getitem__ total: {time.perf_counter() - t0:.6f}s")
         return (line_idx, starts, goals, (a, b), label)
 
-def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
+def custom_collate(batch, env):
     """Collate by grouping items sharing the same line_idx (episode).
     For each episode, compute get_obs() and get_neighbor_goal_heuristics_as_patches()
     once over the unique agents participating in that episode's pairs, then
     assemble per-pair tensors in the ORIGINAL batch order.
     """
 
+    # helper: safe CUDA sync (no-op on CPU)
+    def _sync():
+        try:
+            if isinstance(env.device, torch.device) and env.device.type == 'cuda':
+                torch.cuda.synchronize(env.device)
+            else:
+                torch.cuda.synchronize()
+        except Exception:
+            pass
+
+    t0 = time.perf_counter()
+    # accumulators
+    t_unpack = 0.0
+    t_group  = 0.0
+    t_getobs = 0.0
+    t_getnb  = 0.0
+    t_assem  = 0.0
+    t_pad    = 0.0
+    ep_stats = []  # list of (agents_in_ep, pairs_in_ep, max_nb_ep)
+
     # Unpack batch tuples: (line_idx, starts, goals, (a,b), label)
     line_idx, starts_list, goals_list, agent_pairs, labels = zip(*batch)
     B_total = len(agent_pairs)
+    t_unpack = time.perf_counter() - t0
+    t1 = time.perf_counter()
 
     # Labels (preserve original order)
     labels_batch = torch.tensor(labels, dtype=torch.long)
@@ -253,11 +359,16 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
     for i, li in enumerate(line_idx):
         groups[li].append(i)
 
+    t_group = time.perf_counter() - t1
+    t2 = time.perf_counter()
+
     # Preallocate containers in ORIGINAL order
     obs_chunks  = [None] * B_total                # each slot: (2, C, fov, fov)
     neigh_flat  = [None] * (2 * B_total)          # slot 2*i and 2*i+1 for pair i
     coords_flat = [None] * (2 * B_total)          # same indexing as neigh_flat
     dists = [None] * B_total  # per-pair L1 distance (|dx|+|dy|)
+    dx_list = [None] * B_total  # integer dx per pair (xb - xa)
+    dy_list = [None] * B_total  # integer dy per pair (yb - ya)
 
     # Process one episode at a time (to avoid recomputation), but fill by original indices
     for li, idxs in groups.items():
@@ -275,18 +386,31 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
 
         # If Environment is stateful
         env.starts = starts
+        env.torch_starts = torch.tensor(starts, dtype=torch.long, device=env.device)
         env.goals  = goals
 
         # 1) Compute per-agent observations ONCE for this episode
-        obs_K = env.get_obs(ep_agents)  # (K, C, fov, fov)
+        _sync(); t_obs0 = time.perf_counter()
+        obs_K = env.get_obs(ep_agents)
+        _sync(); t_obs1 = time.perf_counter()
+
         if obs_K.device != env.device:
+            t_mv0 = time.perf_counter(); _sync()
             obs_K = obs_K.to(env.device, non_blocking=True)
+            _sync(); t_mv1 = time.perf_counter()
+            t_getobs += (t_obs1 - t_obs0) + (t_mv1 - t_mv0)
+        else:
+            t_getobs += (t_obs1 - t_obs0)
 
         # 2) Compute per-agent neighbor heuristic patches ONCE for this episode
+        _sync(); t_nb0 = time.perf_counter()
         nf_list, nc_list = env.get_neighbor_goal_heuristics_as_patches(ep_agents)
+        _sync(); t_nb1 = time.perf_counter()
+        t_getnb += (t_nb1 - t_nb0)
         # nf_list / nc_list are lists of length K with tensors for each agent
 
         # 3) Fill slots for each pair by its original batch index
+        t_as0 = time.perf_counter()
         for i in idxs:
             a, b = agent_pairs[i]
             ia = agent_to_pos[a]
@@ -297,38 +421,12 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
             # compute L1 distance between agents a and b
             ya, xa = starts[a]
             yb, xb = starts[b]
-            l1 = abs(yb - ya) + abs(xb - xa)
+            dy = (yb - ya)
+            dx = (xb - xa)
+            l1 = abs(dy) + abs(dx)
             dists[i] = l1
-
-            # Optional pair features
-            if add_pair_id or add_pair_rel:
-                fov_sz = pair_obs.size(-1)
-                cen = fov_sz // 2
-
-            if add_pair_id:
-                # Neighbor-only 1-hot per perspective (no ego channel)
-                pid = torch.zeros((2, 1, fov_sz, fov_sz), device=pair_obs.device, dtype=pair_obs.dtype)
-                ya, xa = starts[a]
-                yb, xb = starts[b]
-                # A perspective: mark B relative to A
-                dy, dx = (yb - ya), (xb - xa)
-                y_rel, x_rel = cen + dy, cen + dx
-                if 0 <= y_rel < fov_sz and 0 <= x_rel < fov_sz:
-                    pid[0, 0, y_rel, x_rel] = 1.0
-                # B perspective: mark A relative to B
-                dy2, dx2 = (ya - yb), (xa - xb)
-                y_rel2, x_rel2 = cen + dy2, cen + dx2
-                if 0 <= y_rel2 < fov_sz and 0 <= x_rel2 < fov_sz:
-                    pid[1, 0, y_rel2, x_rel2] = 1.0
-                pair_obs = torch.cat([pair_obs, pid], dim=1)  # (2, C+1, fov, fov)
-
-            if add_pair_rel:
-                # Two broadcast channels with normalized (dx,dy) from ego->neighbor
-                dx_norm = (xb - xa) / env.size_x
-                dy_norm = (yb - ya) / env.size_y
-                rel = torch.tensor([dx_norm, dy_norm], device=pair_obs.device, dtype=pair_obs.dtype)
-                rel = rel.view(1, 2, 1, 1).expand(2, -1, fov_sz, fov_sz)
-                pair_obs = torch.cat([pair_obs, rel], dim=1)  # (2, C+1(+2), fov, fov)
+            dx_list[i] = dx
+            dy_list[i] = dy
 
             obs_chunks[i] = pair_obs
             # neighbor features/coords for A then B (keeps alignment with obs_pairs)
@@ -336,6 +434,9 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
             neigh_flat[2 * i + 1] = nf_list[ib]
             coords_flat[2 * i]     = nc_list[ia]
             coords_flat[2 * i + 1] = nc_list[ib]
+        t_assem += time.perf_counter() - t_as0
+        _sync()
+        ep_stats.append((len(ep_agents), len(idxs)))
 
     # Sanity: ensure all slots filled
     # (avoids silent misalignment if a bug slips in)
@@ -351,6 +452,7 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
     fov  = obs_batch.size(-1)
 
     # ---- Pad neighbors for all 2*B agents, then build mask ----
+    _sync(); t_pad0 = time.perf_counter()
     if len(neigh_flat) == 0:
         device = env.device
         max_nb = 0
@@ -366,6 +468,7 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
         # mask = True where padded rows (all zeros in feat patch)
         row_sum  = padded_feats.abs().sum(dim=(2, 3, 4))
         mask_flat = (row_sum == 0)
+    _sync(); t_pad = time.perf_counter() - t_pad0
 
     max_nb       = padded_feats.size(1) if padded_feats.dim() > 1 else 0
     neigh_batch  = padded_feats.view(B, 2, max_nb, 1, fov, fov)
@@ -373,10 +476,31 @@ def custom_collate(batch, env, add_pair_id=False, add_pair_rel=False):
     mask_batch   = mask_flat.view(B, 2, max_nb)
 
     dists_batch = torch.tensor(dists, dtype=torch.long)
-    return obs_batch, neigh_batch, coords_batch, labels_batch, mask_batch, dists_batch
+    dx_batch = torch.tensor(dx_list, dtype=torch.long)
+    dy_batch = torch.tensor(dy_list, dtype=torch.long)
+
+    _sync(); t_total = time.perf_counter() - t0
+
+    if PROFILE_COLLATE:
+        global _COLLATE_CALLS
+        _COLLATE_CALLS += 1
+        if _COLLATE_CALLS % PROFILE_EVERY == 0:
+            # Aggregate episode stats
+            num_eps = len(set(line_idx))
+            agents_sum = sum(a for (a, _) in ep_stats) if ep_stats else 0
+            pairs_sum  = sum(p for (_, p) in ep_stats) if ep_stats else 0
+            max_nb_val = padded_feats.size(1) if 'padded_feats' in locals() and padded_feats.dim() > 1 else 0
+            print((
+                f"[collate] B={B_total} eps={num_eps} agents_in_ep_sum={agents_sum} pairs_in_ep_sum={pairs_sum} "
+                f"max_nb={max_nb_val} | times: unpack={t_unpack*1000:.1f}ms, group={t_group*1000:.1f}ms, "
+                f"get_obs={t_getobs*1000:.1f}ms, get_neigh={t_getnb*1000:.1f}ms, assemble={t_assem*1000:.1f}ms, "
+                f"pad={t_pad*1000:.1f}ms, total={t_total*1000:.1f}ms"
+            ))
+
+    return obs_batch, neigh_batch, coords_batch, labels_batch, mask_batch, dists_batch, dx_batch, dy_batch
 
 # --- Training Loop ---
-def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, device, sample_file=None, mode="auto", ema_decay=0.999, use_stability=True, add_pair_id=False, add_pair_rel=False, use_hardneg=False, hardneg_radius=5, hardneg_frac=0.5):
+def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs, writer, model_file, device, sample_file=None, mode="auto", ema_decay=0.999, use_stability=True, use_hardneg=False, hardneg_radius=5, hardneg_frac=0.5):
     """
     mode:
       - "stacked"  : expects model(...) -> (_, bin_logits[B], dir_logits[B,2])
@@ -394,22 +518,34 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
     balanced_loader = DataLoader(
         data,
         batch_size=BATCH_SIZE,
-        collate_fn=lambda batch, env=env, add_pair_id=add_pair_id, add_pair_rel=add_pair_rel: custom_collate(batch, env, add_pair_id=add_pair_id, add_pair_rel=add_pair_rel),
+        collate_fn=lambda batch, env=env: custom_collate(batch, env),
         shuffle=True,
         # num_workers=8,
         # pin_memory=True,
         # persistent_workers=True
     )
     print(f"Number of batches: {len(balanced_loader)}")
+    print()
 
     test_data = PairDataset(sample_file+'test_data.txt', env, undersample=True, use_hardneg=False)
     test_loader = DataLoader(
         test_data,
         batch_size=BATCH_SIZE,
-        collate_fn=lambda batch, env=env, add_pair_id=add_pair_id, add_pair_rel=add_pair_rel: custom_collate(batch, env, add_pair_id=add_pair_id, add_pair_rel=add_pair_rel),
+        collate_fn=lambda batch, env=env: custom_collate(batch, env),
         shuffle=False,
         # pin_memory=True,
     )
+
+    # --- Append dataset sizes to run_config.yaml ---
+    out_dir = os.path.dirname(model_file)
+    try:
+        with open(os.path.join(out_dir, "run_config.yaml"), "a") as f:
+            yaml.safe_dump({
+                "num_train_samples": len(data),
+                "num_test_samples": len(test_data),
+            }, f, default_flow_style=False)
+    except Exception as e:
+        print(f"Warning: Could not append dataset sizes to run_config.yaml: {e}")
 
     # --- Scheduler (warmup + cosine) and EMA (optional) ---
     steps_per_epoch = max(1, len(balanced_loader))
@@ -446,7 +582,7 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
         all_tri_logits = []                      # for threeway
 
         for batch_n, batch in tqdm(enumerate(balanced_loader)):
-            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask, dists_batch = batch
+            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask, dists_batch, dx_batch, dy_batch = batch
 
             # Transfers
             obs_fovs_batch = obs_fovs_batch.to(device, non_blocking=True)
@@ -454,9 +590,82 @@ def train_on_dataset(env, model, optimizer, criterion, BATCH_SIZE, train_epochs,
             neigh_coords_batch = neigh_coords_batch.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             labels_batch = labels_batch.to(device, non_blocking=True)
+            dx_batch = dx_batch.to(device, non_blocking=True)
+            dy_batch = dy_batch.to(device, non_blocking=True)
+
+            # --- Build pair_pointer based on pointer mode ---
+            pointer_mode = os.environ.get('RHCR_POINTER_MODE', 'none')
+            try:
+                pointer_mode = getattr(args, 'pointer_mode', pointer_mode)
+            except Exception:
+                pass
+            pointer_mode = str(pointer_mode).lower()
+
+            pair_pointer = None
+            if pointer_mode != 'none':
+                Bp = obs_fovs_batch.size(0)
+                fov_size  = obs_fovs_batch.size(-1)
+                cen = fov_size // 2
+                # split per-side images: (B,2,C,F,F) -> A: (B,C,F,F), Bim: (B,C,F,F)
+                Aimg_full = obs_fovs_batch[:, 0]
+                Bimg_full = obs_fovs_batch[:, 1]
+
+                # Strip the coordinate channel (detected by two nonzeros at [0,0] and [0,1])
+                def strip_coord(t):
+                    first = t[0]  # (C,F,F)
+                    C_in  = first.size(0)
+                    nz = (first != 0).view(C_in, -1).sum(dim=1)
+                    coord_idx = None
+                    for c in range(C_in):
+                        if nz[c].item() == 2 and bool(first[c,0,0] != 0) and bool(first[c,0,1] != 0):
+                            coord_idx = c; break
+                    if coord_idx is None:
+                        coord_idx = C_in - 1
+                    if coord_idx == 0:
+                        return t[:, 1:]
+                    elif coord_idx == C_in - 1:
+                        return t[:, :-1]
+                    else:
+                        return torch.cat([t[:, :coord_idx], t[:, coord_idx+1:]], dim=1)
+
+                Aimg = strip_coord(Aimg_full)
+                Bimg = strip_coord(Bimg_full)
+
+                dx = dx_batch
+                dy = dy_batch
+                y_ab = (cen + dy).clamp(0, F-1)
+                x_ab = (cen + dx).clamp(0, F-1)
+                y_ba = (cen - dy).clamp(0, F-1)
+                x_ba = (cen - dx).clamp(0, F-1)
+
+                if pointer_mode == 'raw':
+                    rng = torch.arange(Aimg.size(0), device=Aimg.device)
+                    f_a_at_b = Aimg[rng, :, y_ab, x_ab]
+                    f_b_at_a = Bimg[rng, :, y_ba, x_ba]
+                elif pointer_mode == 'trunk':
+                    # Encode trunk features for both sides in one call
+                    flat_agents = torch.cat([Aimg, Bimg], dim=0)  # (2B, C_in, F, F)
+                    trunk_maps = model.encode_trunk(flat_agents)
+                    Fa = trunk_maps[:Bp]
+                    Fb = trunk_maps[Bp:]
+                    rng = torch.arange(Fa.size(0), device=Fa.device)
+                    f_a_at_b = Fa[rng, :, y_ab, x_ab]
+                    f_b_at_a = Fb[rng, :, y_ba, x_ba]
+                else:
+                    f_a_at_b = None; f_b_at_a = None
+
+                size_y_t = float(env.size_y)
+                size_x_t = float(env.size_x)
+                dxn = dx.float() / max(1.0, size_x_t)
+                dyn = dy.float() / max(1.0, size_y_t)
+                dist_l1 = (dx.abs() + dy.abs()).float()
+
+                ptr_A = torch.cat([f_a_at_b, dxn.unsqueeze(1), dyn.unsqueeze(1), dist_l1.unsqueeze(1)], dim=1)  # (B, C_ptr+3)
+                ptr_B = torch.cat([f_b_at_a, (-dxn).unsqueeze(1), (-dyn).unsqueeze(1), dist_l1.unsqueeze(1)], dim=1)
+                pair_pointer = torch.stack([ptr_A, ptr_B], dim=1)  # (B,2,D_ptr)
 
             # Forward
-            outputs = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
+            outputs = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask, pair_pointer=pair_pointer)
 
             # Infer or respect mode
             effective_mode = mode
@@ -655,15 +864,88 @@ def evaluate(test_loader, model, epoch, criterion, writer, device, mode="auto", 
 
     with torch.no_grad():
         for batch_n, batch in tqdm(enumerate(test_loader)):
-            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask, dists_batch = batch
+            obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, labels_batch, mask, dists_batch, dx_batch, dy_batch = batch
 
             obs_fovs_batch = obs_fovs_batch.to(device, non_blocking=True)
             neighbor_features_batch = neighbor_features_batch.to(device, non_blocking=True)
             neigh_coords_batch = neigh_coords_batch.to(device, non_blocking=True)
             mask = mask.to(device, non_blocking=True)
             labels_batch = labels_batch.to(device, non_blocking=True)
+            dx_batch = dx_batch.to(device, non_blocking=True)
+            dy_batch = dy_batch.to(device, non_blocking=True)
 
-            outputs = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask)
+            # --- Build pair_pointer based on pointer mode ---
+            pointer_mode = os.environ.get('RHCR_POINTER_MODE', 'none')
+            try:
+                pointer_mode = getattr(args, 'pointer_mode', pointer_mode)
+            except Exception:
+                pass
+            pointer_mode = str(pointer_mode).lower()
+
+            pair_pointer = None
+            if pointer_mode != 'none':
+                Bp = obs_fovs_batch.size(0)
+                fov_size  = obs_fovs_batch.size(-1)
+                cen = fov_size // 2
+                # split per-side images: (B,2,C,F,F) -> A: (B,C,F,F), Bim: (B,C,F,F)
+                Aimg_full = obs_fovs_batch[:, 0]
+                Bimg_full = obs_fovs_batch[:, 1]
+
+                # Strip the coordinate channel (detected by two nonzeros at [0,0] and [0,1])
+                def strip_coord(t):
+                    first = t[0]  # (C,F,F)
+                    C_in  = first.size(0)
+                    nz = (first != 0).view(C_in, -1).sum(dim=1)
+                    coord_idx = None
+                    for c in range(C_in):
+                        if nz[c].item() == 2 and bool(first[c,0,0] != 0) and bool(first[c,0,1] != 0):
+                            coord_idx = c; break
+                    if coord_idx is None:
+                        coord_idx = C_in - 1
+                    if coord_idx == 0:
+                        return t[:, 1:]
+                    elif coord_idx == C_in - 1:
+                        return t[:, :-1]
+                    else:
+                        return torch.cat([t[:, :coord_idx], t[:, coord_idx+1:]], dim=1)
+
+                Aimg = strip_coord(Aimg_full)
+                Bimg = strip_coord(Bimg_full)
+
+                dx = dx_batch
+                dy = dy_batch
+                y_ab = (cen + dy).clamp(0, F-1)
+                x_ab = (cen + dx).clamp(0, F-1)
+                y_ba = (cen - dy).clamp(0, F-1)
+                x_ba = (cen - dx).clamp(0, F-1)
+
+                if pointer_mode == 'raw':
+                    rng = torch.arange(Aimg.size(0), device=Aimg.device)
+                    f_a_at_b = Aimg[rng, :, y_ab, x_ab]
+                    f_b_at_a = Bimg[rng, :, y_ba, x_ba]
+                elif pointer_mode == 'trunk':
+                    # Encode trunk features for both sides in one call
+                    flat_agents = torch.cat([Aimg, Bimg], dim=0)  # (2B, C_in, F, F)
+                    trunk_maps = model.encode_trunk(flat_agents)
+                    Fa = trunk_maps[:Bp]
+                    Fb = trunk_maps[Bp:]
+                    rng = torch.arange(Fa.size(0), device=Fa.device)
+                    f_a_at_b = Fa[rng, :, y_ab, x_ab]
+                    f_b_at_a = Fb[rng, :, y_ba, x_ba]
+                else:
+                    f_a_at_b = None; f_b_at_a = None
+
+                size_y_t = float(getattr(env, 'size_y', 1.0))
+                size_x_t = float(getattr(env, 'size_x', 1.0))
+                dxn = dx.float() / max(1.0, size_x_t)
+                dyn = dy.float() / max(1.0, size_y_t)
+                dist_l1 = (dx.abs() + dy.abs()).float()
+
+                ptr_A = torch.cat([f_a_at_b, dxn.unsqueeze(1), dyn.unsqueeze(1), dist_l1.unsqueeze(1)], dim=1)  # (B, C_ptr+3)
+                ptr_B = torch.cat([f_b_at_a, (-dxn).unsqueeze(1), (-dyn).unsqueeze(1), dist_l1.unsqueeze(1)], dim=1)
+                pair_pointer = torch.stack([ptr_A, ptr_B], dim=1)  # (B,2,D_ptr)
+
+            outputs = model(obs_fovs_batch, neighbor_features_batch, neigh_coords_batch, mask, pair_pointer=pair_pointer)
 
             # infer mode if needed
             effective_mode = mode
@@ -819,10 +1101,10 @@ def main():
     parser.add_argument("--use_hardneg", type=int, default=0, help="1 to enable hard-negative sampling for class 2")
     parser.add_argument("--hard_radius", type=int, default=5, help="Manhattan radius for hard negatives (class 2)")
     parser.add_argument("--hard_frac", type=float, default=0.5, help="Fraction of class-2 batch to draw from hard negatives")
-    parser.add_argument("--pair_id", type=int, default=0, help="1 to add neighbor one-hot channel (paired agent) to obs")
-    parser.add_argument("--pair_rel", type=int, default=0, help="1 to add two broadcast channels with normalized (dx,dy) from ego->neighbor")
+    parser.add_argument("--pointer_mode", type=str, default="none", choices=["none","raw","trunk"],
+                        help="Pointer features for pair reasoning: none (off), raw (sample from input channels), trunk (sample from encoder trunk)")
     parser.add_argument("--criterion", type=str, default="ce", choices=["ce", "focal"], help="Loss for threeway head")
-    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focusing parameter gamma for focal loss")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focusing parameter gamma for focal loss") 
     parser.add_argument("--focal_alpha", type=str, default="0.5,0.3,0.2", help="Comma-separated per-class alpha for focal loss (len=3)")
     args, unknown = parser.parse_known_args()
     try:
@@ -850,12 +1132,11 @@ def main():
             env_config,
             logger=Logger(),  # Dummy logger
             grid_map_file=config["paths"]["map_file"],
-            heuristic_map_file=config["paths"]["heur_file"],
             device=device
         )
 
         map_name = os.path.basename(config["paths"]["map_file"]).replace('.npy','')
-        sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{map_name}/{NUM_AGENTS}/w{WINDOW_SIZE}/')
+        sample_file = os.path.join(os.path.dirname(__file__), f'data_gen/{map_name}/w{WINDOW_SIZE}/{NUM_AGENTS}/')
 
         # ---- Build descriptive model filename from training args ----
         def sanitize(s: str) -> str:
@@ -870,10 +1151,6 @@ def main():
             tag_parts.append('stability' if args.use_stability else 'base')
             if args.use_hardneg:
                 tag_parts.append(f"HN-r{int(args.hard_radius)}-f{args.hard_frac:g}")
-            if args.pair_id:
-                tag_parts.append("pairMask")
-            if args.pair_rel:
-                tag_parts.append("pairRel")
             if MODE == 'threeway' and args.criterion == 'focal':
                 # include gamma and alpha vector
                 try:
@@ -881,26 +1158,17 @@ def main():
                 except Exception:
                     alphas_str = 'na'
                 tag_parts.append(f"focal-g{args.focal_gamma:g}-a{alphas_str}")
+            # --- Add pointer mode info if not "none" ---
+            if getattr(args, "pointer_mode", "none") != "none":
+                tag_parts.append(f"ptr-{args.pointer_mode}")
             tag = '_'.join(tag_parts)
-        os.makedirs("models", exist_ok=True)
-        model_file = os.path.join("models", f"N{NUM_AGENTS}_w{WINDOW_SIZE}_{MODE}_{tag}.pth")
+        os.makedirs(f"models/w{WINDOW_SIZE}/{NUM_AGENTS}", exist_ok=True)
+        model_file = os.path.join(f"models/w{WINDOW_SIZE}/{NUM_AGENTS}", f"N{NUM_AGENTS}_w{WINDOW_SIZE}_{MODE}_{tag}.pth")
 
         run_root = os.path.join("runs", map_name, MODE, f"w{WINDOW_SIZE}", f"{NUM_AGENTS}")
-        run_dir  = run_root
         if args.experiment_name:
             run_dir = os.path.join(run_root, args.experiment_name)
         else:
-            tag = "stability" if args.use_stability else "base"
-            if args.use_hardneg:
-                tag += f"_HN-r{int(args.hard_radius)}-f{args.hard_frac:g}"
-            if args.pair_id:
-                tag += "_pairMask"
-            if args.pair_rel:
-                tag += "_pairRel"
-            if train_config.get("MODE", "auto") == "threeway" and args.criterion == "focal":
-                # include both gamma and alpha in run name
-                alphas_str = sanitize(args.focal_alpha) if isinstance(args.focal_alpha, str) else "na"
-                tag += f"_focal-g{args.focal_gamma:g}-a{alphas_str}"
             run_dir = os.path.join(run_root, tag)
         writer = SummaryWriter(log_dir=run_dir)
 
@@ -926,11 +1194,10 @@ def main():
                     "use_hardneg": bool(args.use_hardneg),
                     "hard_radius": int(args.hard_radius),
                     "hard_frac": float(args.hard_frac),
-                    "pair_id": bool(args.pair_id),
-                    "pair_rel": bool(args.pair_rel),
                     "criterion": args.criterion,
                     "focal_gamma": float(args.focal_gamma) if args.criterion == "focal" else None,
                     "focal_alpha": str(args.focal_alpha) if args.criterion == "focal" else None,
+                    "pointer_mode": str(args.pointer_mode),
                 },
                 "artifacts": {
                     "model_file": model_file,
@@ -970,7 +1237,6 @@ def main():
         best_acc = train_on_dataset(
             env, model, optimizer, criterion, BATCH_SIZE, EPOCHS, writer, model_file, device,
             sample_file=sample_file, mode=MODE, use_stability=bool(args.use_stability),
-            add_pair_id=bool(args.pair_id), add_pair_rel=bool(args.pair_rel),
             use_hardneg=bool(args.use_hardneg), hardneg_radius=args.hard_radius, hardneg_frac=args.hard_frac
         )
 

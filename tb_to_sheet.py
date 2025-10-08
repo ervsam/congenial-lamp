@@ -1,3 +1,6 @@
+# python tb_to_sheet.py   --runs_dir runs   --out_csv exp_summary/kiva_large.csv --filter "kiva_large/threeway/.*/"
+
+
 #!/usr/bin/env python3
 import argparse, os, csv, sys, re
 from pathlib import Path
@@ -46,12 +49,12 @@ def get_value_at_step(series, step):
 
 def parse_experiment_fields(run_path: Path):
     """
-    Robustly extract (mode, window, num_agents, experiment) from run path.
-
-    Supports:
-      runs/<experiment>/w<win>/<agents>
-      runs/<mode>/w<win>/<agents>/<experiment>
-      and nested experiment names between runs/ and w<win>/ (joined with '/')
+    Extract (mode, window, num_agents, experiment) from run path.
+    New directory structure:
+        runs/<map>/<mode>/w<win>/<agents>/<experiment>
+    Returns:
+        mode (str), window (int or str), agents (int or str), experiment (str)
+    If parsing fails, fall back to previous logic: return '', '', '', run_path.name
     """
     parts = run_path.parts
     try:
@@ -59,30 +62,53 @@ def parse_experiment_fields(run_path: Path):
     except ValueError:
         return '', '', '', run_path.name
 
-    # Find first 'w<digits>' segment after 'runs'
-    wi = None
-    for idx in range(r + 1, len(parts)):
-        if re.fullmatch(r'w\d+', parts[idx]):
-            wi = idx
-            break
-    if wi is None:
-        # No window segment; fall back to last component as experiment
-        return '', '', '', parts[-1]
+    # Expect: runs/<map>/<mode>/w<win>/<agents>/<experiment>
+    # r: index of 'runs'
+    try:
+        # Next part: map name (string)
+        map_name = parts[r + 1]
+        # Next part: mode (string)
+        mode = parts[r + 2]
+        # Next part: w<win>
+        wpart = parts[r + 3]
+        win = int(wpart[1:]) if wpart.startswith('w') and wpart[1:].isdigit() else ''
+        # Next part: agents
+        agents = int(parts[r + 4]) if parts[r + 4].isdigit() else parts[r + 4]
+        # Next part: experiment name (may be joined if path is deeper)
+        if len(parts) > r + 5:
+            exp = '/'.join(parts[r + 5:])
+        else:
+            exp = ''
+        return mode, win, agents, exp
+    except Exception:
+        # Fallback: previous logic (for legacy or unexpected structure)
+        try:
+            # Find first 'w<digits>' segment after 'runs'
+            wi = None
+            for idx in range(r + 1, len(parts)):
+                if re.fullmatch(r'w\d+', parts[idx]):
+                    wi = idx
+                    break
+            if wi is None:
+                # No window segment; fall back to last component as experiment
+                return '', '', '', parts[-1]
 
-    # Window and agents2
-    win = int(parts[wi][1:]) if re.search(r'\d+', parts[wi]) else ''
-    agents = int(parts[wi + 1]) if (wi + 1 < len(parts) and parts[wi + 1].isdigit()) else ''
+            # Window and agents2
+            win = int(parts[wi][1:]) if re.search(r'\d+', parts[wi]) else ''
+            agents = int(parts[wi + 1]) if (wi + 1 < len(parts) and parts[wi + 1].isdigit()) else ''
 
-    # Everything between 'runs/' and 'w<win>/' is the experiment string
-    if wi - (r + 1) >= 1:
-        exp = parts[r + 1] if wi == r + 2 else '/'.join(parts[r + 1:wi])
-    else:
-        exp = ''
+            # Everything between 'runs/' and 'w<win>/' is the experiment string
+            if wi - (r + 1) >= 1:
+                exp = parts[r + 1] if wi == r + 2 else '/'.join(parts[r + 1:wi])
+            else:
+                exp = ''
 
-    # Mode heuristic: first token before '_' (e.g., 'threeway_weighted' -> 'threeway')
-    mode = exp.split('_')[0] if exp else ''
+            # Mode heuristic: first token before '_' (e.g., 'threeway_weighted' -> 'threeway')
+            mode = exp.split('_')[0] if exp else ''
 
-    return mode, win, agents, exp
+            return mode, win, agents, exp
+        except Exception:
+            return '', '', '', run_path.name
 def collect_one_run(run_dir: Path):
     scalars = load_scalars(run_dir)
 

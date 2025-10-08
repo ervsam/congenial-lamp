@@ -28,25 +28,31 @@ class Encoder(nn.Module):
         super().__init__()
         self.fov = fov
 
-        # Use LazyConv2d to accept variable # of input channels at first forward
-        self.conv = nn.Sequential(
+        # Trunk produces a spatial feature map (Ctrunk x F x F)
+        self.trunk = nn.Sequential(
             nn.LazyConv2d(32, 3, padding=1),
             nn.LeakyReLU(),
-            ResBlock(32),                             # <- keep two res-blocks
             ResBlock(32),
             ResBlock(32),
-            # nn.Dropout2d(p=0.10),                     # not 0.20
-            nn.Conv2d(32, 16, 1), 
+            ResBlock(32),
+            nn.Conv2d(32, 16, 1),
             nn.LeakyReLU(),
+        )
+        # Image head turns trunk feature map into a vector
+        self.img_head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(16*self.fov*self.fov, hid_dim),
-            nn.LeakyReLU()
+            nn.Linear(16 * self.fov * self.fov, hid_dim),
+            nn.LeakyReLU(),
         )
         self.coord_fc = nn.Linear(2, 64)
         self.out      = nn.Linear(hid_dim + 64, hid_dim)
 
+    def img_to_vec(self, feat_map):
+        return self.img_head(feat_map)
+
     def forward(self, x, coords):
-        h_img   = self.conv(x)
+        feat_map = self.trunk(x)
+        h_img   = self.img_to_vec(feat_map)
         h_coord = self.coord_fc(coords)
         h       = torch.cat([h_img, h_coord], dim=-1)
         return self.out(h)
@@ -60,6 +66,9 @@ class QNetwork(nn.Module):
         self.fov = fov
         self.num_actions = 3
         self.encoder = Encoder(fov, hid_dim=self.hid_dim)
+
+        # Pointer projection: maps per-side pointer vector (D_ptr) -> hid_dim
+        self.ptr_fc = nn.LazyLinear(self.hid_dim)
 
         # Head selection: "stacked" (binary + direction) or "threeway" (single 3-class head)
         allowed_modes = {"stacked", "threeway"}
@@ -116,11 +125,22 @@ class QNetwork(nn.Module):
 
         self.neighbor_attn = nn.MultiheadAttention(self.hid_dim, num_heads=4, batch_first=True)
 
+    def encode_trunk(self, patches):
+        # patches: (B2, C_in, F, F) WITHOUT the coord channel
+        return self.encoder.trunk(patches)
+
+    def encode_head(self, trunk_map, coords):
+        # trunk_map: (B2, Ctrunk, F, F), coords: (B2, 2)
+        h_img   = self.encoder.img_to_vec(trunk_map)
+        h_coord = self.encoder.coord_fc(coords)
+        return self.encoder.out(torch.cat([h_img, h_coord], dim=-1))
+
     def forward(self,
                 batch_obs,
                 batch_neighbor_patches = None,  # Tensor(batch_size, 2, max_neighbor, 1, F, F)
-                batch_neigh_coords = None, # Tensor(batch_size, 2, max_neighbor, 2)
-                mask = None
+                batch_neigh_coords = None,      # Tensor(batch_size, 2, max_neighbor, 2)
+                mask = None,
+                pair_pointer = None             # Optional: (batch_size, 2, D_ptr)
             ):
 
         #### ---------------------------------------------------------------- ##
@@ -175,6 +195,10 @@ class QNetwork(nn.Module):
         batch_obs = img  # (B2, C-1, F, F) with variable channels
 
         batch_enc   = self.encoder(batch_obs, batch_coordinates)     # (batch_size*2, h)
+        # Optional pointer features (per-side) → residual into embeddings
+        if pair_pointer is not None:
+            pp = pair_pointer.view(batch_size * 2, -1)
+            batch_enc = batch_enc + self.ptr_fc(pp)
         assert batch_enc.shape == (batch_size*2, hid_dim), f"Expected {(batch_size*2, hid_dim)}, got {batch_enc.shape}"
 
         # ----- Encode neighbor patches (batched across all episodes and agents) -----
